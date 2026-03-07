@@ -1,0 +1,22 @@
+# https://dart.dev/guides/libraries/private-files
+# Archivos de Dart
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+
+# Dart Frog
+.dart_frog/
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
