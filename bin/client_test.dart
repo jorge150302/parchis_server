@@ -6,10 +6,17 @@ void main() async {
   final channel = IOWebSocketChannel.connect('ws://localhost:8080/ws');
   print('✅ Conectado al servidor de Parchís');
 
+  final String myClientId = 'Client_${DateTime.now().millisecondsSinceEpoch}';
+
   channel.stream.listen((dynamic message) {
     try {
-      // Añadimos "as Map<String, dynamic>" para evitar el error de tipos
-      final event = jsonDecode(message as String) as Map<String, dynamic>;
+      // Convertimos el mensaje a String de forma segura
+      final String rawMessage = message is List<int> 
+          ? utf8.decode(message) 
+          : message as String;
+
+      // Hacemos cast explícito a Map
+      final event = jsonDecode(rawMessage) as Map<String, dynamic>;
       final eventName = event['event'] as String;
       final data = (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
 
@@ -24,11 +31,13 @@ void main() async {
           print('\n--- TABLERO ---');
           print('Sala: ${data['roomCode']}');
           final players = data['players'] as List<dynamic>;
-          for (var p in players) {
+          for (final p in players) {
             final player = p as Map<String, dynamic>;
-            print('👤 [Slot ${player['index']}] ${player['name']} | Pos: ${player['position']} | AI: ${player['isAI']}');
+            final String isMe = player['id'] == myClientId ? ' (YO)' : '';
+            print('👤 [Slot ${player['index']}] ${player['name']} | Pos: ${player['position']} | AI: ${player['isAI']}$isMe');
           }
-          print('👉 Turno de: ${data['currentPlayerId']}');
+          final String turnText = data['currentPlayerId'] == myClientId ? '¡TU TURNO!' : (data['currentPlayerId'] as String);
+          print('👉 Turno de: $turnText');
           break;
         case 'dice_result':
           print('\n🎲 DADO: ${data['diceValue']} (Por: ${data['playerId']})');
@@ -58,23 +67,27 @@ void main() async {
     if (input == 'create') {
       channel.sink.add(jsonEncode({
         'event': 'create_game',
+        'clientId': myClientId,
         'data': {'name': 'Anfitrión'}
       }));
-    }
-    else if (input.startsWith('join ')) {
+    } else if (input.startsWith('join ')) {
       final parts = input.split(' ');
       if (parts.length < 2) return;
       final code = parts[1];
       channel.sink.add(jsonEncode({
         'event': 'join_game',
-        'data': {'roomCode': code, 'name': 'Tester_${DateTime.now().second % 100}'}
+        'clientId': myClientId,
+        'data': {'roomCode': code, 'name': 'Tester'}
       }));
-    }
-    else if (input == 'roll') {
-      channel.sink.add(jsonEncode({'event': 'roll_dice'}));
+    } else if (input == 'roll') {
+      channel.sink.add(jsonEncode({
+        'event': 'roll_dice',
+        'clientId': myClientId
+      }));
     } else {
       channel.sink.add(jsonEncode({
         'event': 'chat_message',
+        'clientId': myClientId,
         'data': {'message': input}
       }));
     }

@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:dart_frog/dart_frog.dart';
 import 'package:dart_frog_web_socket/dart_frog_web_socket.dart';
 
-// Cambiamos imports relativos por package imports para evitar advertencias
 import 'package:parchis_server/game_engine.dart';
 import 'package:parchis_server/logic/board_generator.dart';
 import 'package:parchis_server/logic/board_presets.dart';
@@ -41,9 +40,17 @@ Future<Response> onRequest(RequestContext context) async {
           final event = jsonDecode(message as String) as Map<String, dynamic>;
           final eventName = event['event'] as String;
           final data = (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
+          
+          // EXTRAEMOS EL clientId DE LA RAÍZ DEL JSON
+          final String? clientId = event['clientId'] as String?;
 
           // 1. EVENTO: create_game
           if (eventName == 'create_game') {
+            if (clientId == null) {
+              _sendError(channel, 'clientId es requerido.');
+              return;
+            }
+
             final roomCode = (DateTime.now().millisecondsSinceEpoch % 100000)
                 .toString()
                 .padLeft(5, '0');
@@ -53,14 +60,13 @@ Future<Response> onRequest(RequestContext context) async {
             final room = GameRoom(roomCode, engine);
             _rooms[roomCode] = room;
 
-            final playerId = DateTime.now().millisecondsSinceEpoch.toString();
             final playerName = (data['name'] as String?) ?? 'Anfitrión';
             
-            final newPlayer = Player(id: playerId, name: playerName);
+            final newPlayer = Player(id: clientId, name: playerName);
             room.engine.players.add(newPlayer);
-            room.clients[playerId] = channel;
+            room.clients[clientId] = channel;
             
-            _channelToPlayer[channel] = playerId;
+            _channelToPlayer[channel] = clientId;
             _channelToRoom[channel] = roomCode;
             
             channel.sink.add(jsonEncode({
@@ -73,6 +79,11 @@ Future<Response> onRequest(RequestContext context) async {
 
           // 2. EVENTO: join_game
           if (eventName == 'join_game') {
+            if (clientId == null) {
+              _sendError(channel, 'clientId es requerido.');
+              return;
+            }
+
             final roomCode = data['roomCode'] as String?;
             final room = _rooms[roomCode ?? ''];
 
@@ -82,14 +93,13 @@ Future<Response> onRequest(RequestContext context) async {
                 return;
               }
 
-              final playerId = DateTime.now().millisecondsSinceEpoch.toString();
               final playerName = (data['name'] as String?) ?? 'Jugador ${room.engine.players.length + 1}';
               
-              final newPlayer = Player(id: playerId, name: playerName);
+              final newPlayer = Player(id: clientId, name: playerName);
               room.engine.players.add(newPlayer);
-              room.clients[playerId] = channel;
+              room.clients[clientId] = channel;
               
-              _channelToPlayer[channel] = playerId;
+              _channelToPlayer[channel] = clientId;
               _channelToRoom[channel] = roomCode;
 
               channel.sink.add(jsonEncode({
@@ -167,6 +177,13 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
   final room = _rooms[rCode];
 
   if (room != null && room.engine.currentPlayer.id == pId) {
+    if (room.engine.players.length < 2) {
+      if (channel != null) {
+        _sendError(channel, 'Esperando a que se una otro jugador...');
+      }
+      return;
+    }
+
     final engine = room.engine;
     final player = engine.players.firstWhere((p) => p.id == pId);
 

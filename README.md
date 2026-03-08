@@ -1,12 +1,43 @@
-# parchis_server
+# Parchís Multiplayer Server 🎲🤖
 
-[![style: dart frog lint][dart_frog_lint_badge]][dart_frog_lint_link]
-[![License: MIT][license_badge]][license_link]
-[![Powered by Dart Frog](https://img.shields.io/endpoint?url=https://tinyurl.com/dartfrog-badge)](https://dart-frog.dev)
+Servidor de alto rendimiento para un juego de Parchís multijugador, desarrollado con **Dart Frog** y **WebSockets**.
 
-An example application built with dart_frog
+## 🚀 Características principales
 
-[dart_frog_lint_badge]: https://img.shields.io/badge/style-dart_frog_lint-1DF9D2.svg
-[dart_frog_lint_link]: https://pub.dev/packages/dart_frog_lint
-[license_badge]: https://img.shields.io/badge/license-MIT-blue.svg
-[license_link]: https://opensource.org/licenses/MIT
+- **Multi-sala**: Soporta múltiples partidas simultáneas mediante códigos de sala de 5 dígitos.
+- **IA de Sustitución**: Si un jugador se desconecta, una IA toma el control de su ficha automáticamente tras 2 segundos.
+- **Chat en tiempo real**: Sistema de mensajería integrado por sala.
+- **Sincronización de UI**: Envío optimizado de eventos para animaciones fluidas (delay entre dado y movimiento).
+- **Slots Fijos**: Asignación de colores persistente mediante índices (0-3).
+
+## 🛠️ Requisitos
+
+- Dart SDK
+- Dart Frog CLI (`dart pub global activate dart_frog_cli`)
+
+## 💻 Cómo ejecutar el servidor
+
+Para desarrollo local y conexión con dispositivos móviles en la misma red:
+
+```bash
+dart_frog dev --hostname 0.0.0.0
+```
+
+El servidor escuchará en el puerto **8080**.
+
+## 📱 Conexión desde el Cliente (Flutter)
+
+URL del WebSocket:
+- **Emulador Android**: `ws://10.0.2.2:8080/ws`
+- **Móvil Real / Desktop**: `ws://tu_ip_local:8080/ws`
+
+## 🧪 Pruebas por Consola
+
+Puedes probar el servidor sin necesidad de la App usando el cliente de prueba incluido:
+
+```bash
+dart bin/client_test.dart
+```
+
+---
+Desarrollado con ❤️ usando Dart Frog.
