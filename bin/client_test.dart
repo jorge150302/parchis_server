@@ -10,12 +10,10 @@ void main() async {
 
   channel.stream.listen((dynamic message) {
     try {
-      // Convertimos el mensaje a String de forma segura
       final String rawMessage = message is List<int> 
           ? utf8.decode(message) 
           : message as String;
 
-      // Hacemos cast explícito a Map
       final event = jsonDecode(rawMessage) as Map<String, dynamic>;
       final eventName = event['event'] as String;
       final data = (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
@@ -41,6 +39,9 @@ void main() async {
           break;
         case 'dice_result':
           print('\n🎲 DADO: ${data['diceValue']} (Por: ${data['playerId']})');
+          break;
+        case 'game_event':
+          print('\n🔔 EVENTO: ${data['message']}');
           break;
         case 'chat':
           print('\n💬 [${data['sender']}]: ${data['message']}');
