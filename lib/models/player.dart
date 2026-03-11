@@ -11,7 +11,7 @@ class Player {
   bool isFinished;
   bool isMoving;
   int stepsMoved;
-  bool isAI; // <--- Nuevo campo para la IA
+  bool isAI;
 
   Player({
     required this.id,
@@ -23,7 +23,7 @@ class Player {
     this.isFinished = false,
     this.isMoving = false,
     this.stepsMoved = 0,
-    this.isAI = false, // Por defecto es un humano
+    this.isAI = false,
   });
 
   void resetToStart() {
@@ -60,6 +60,9 @@ class Player {
         'name': name,
         'position': position,
         'isFinished': isFinished,
-        'isAI': isAI, // <--- Incluido en el JSON para la App
+        'isAI': isAI,
+        'skippedTurns': skippedTurns,
+        'extraTurns': extraTurns,
+        'consecutiveSixes': consecutiveSixes,
       };
 }
