@@ -12,10 +12,11 @@ import 'package:parchis_server/models/player.dart';
 // --- Clases de Soporte ---
 
 class GameRoom {
-  GameRoom(this.code, this.engine);
+  GameRoom(this.code, this.engine, this.maxPlayers);
 
   final String code;
   final GameEngine engine;
+  final int maxPlayers;
   final Map<String, WebSocketChannel> clients = {}; // PlayerID -> Channel
 
   void broadcast(Map<String, dynamic> event) {
@@ -54,16 +55,22 @@ Future<Response> onRequest(RequestContext context) async {
                 .padLeft(5, '0');
             final board = generateBoard(classicActionPositions, classicActions);
             final engine = GameEngine(board: board, players: []);
-            final room = GameRoom(roomCode, engine);
+            
+            // 1. Manejo de maxPlayers (Defecto 2)
+            var maxPlayers = (data['maxPlayers'] as int?) ?? 2;
+            
+            if (maxPlayers == 4) {
+              _broadcastInfoToChannel(channel, 'Nota: El servidor prefiere partidas de 2 jugadores para mayor fluidez.');
+            }
+
+            final room = GameRoom(roomCode, engine, maxPlayers);
             _rooms[roomCode] = room;
             final playerName = (data['name'] as String?) ?? 'Anfitrión';
             final newPlayer = Player(id: clientId, name: playerName);
             room.engine.players.add(newPlayer);
             room.clients[clientId] = channel;
-            
             _channelToPlayer[channel] = clientId;
             _channelToRoom[channel] = roomCode;
-            
             channel.sink.add(
               jsonEncode({
                 'event': 'game_created',
@@ -81,10 +88,18 @@ Future<Response> onRequest(RequestContext context) async {
             final roomCode = data['roomCode'] as String?;
             final room = _rooms[roomCode ?? ''];
             if (room != null && roomCode != null) {
-              if (room.engine.players.length >= 4) {
+              // 3. Restricción de re-entrada si terminó
+              if (room.engine.phase == GamePhase.finished) {
+                _sendError(channel, 'La partida ya ha terminado. Sala cerrada.');
+                return;
+              }
+
+              // 2. Validación de Capacidad
+              if (room.engine.players.length >= room.maxPlayers) {
                 _sendError(channel, 'La sala está llena.');
                 return;
               }
+
               final playerName = (data['name'] as String?) ??
                   'Jugador ${room.engine.players.length + 1}';
               final newPlayer = Player(id: clientId, name: playerName);
@@ -101,7 +116,7 @@ Future<Response> onRequest(RequestContext context) async {
               _broadcastGameState(roomCode);
               _broadcastInfo(roomCode, '$playerName se ha unido.');
             } else {
-              _sendError(channel, 'La sala $roomCode no existe.');
+              _sendError(channel, 'La sala $roomCode no existe o ha sido cerrada.');
             }
           }
 
@@ -140,7 +155,8 @@ Future<Response> onRequest(RequestContext context) async {
             room.clients.remove(playerId);
             _broadcastInfo(roomCode, '${player.name} desconectado. IA activa.');
             _broadcastGameState(roomCode);
-            if (room.engine.currentPlayer.id == playerId) {
+            // Solo disparar IA si la partida ya empezó
+            if (room.engine.currentPlayer.id == playerId && room.engine.players.length == room.maxPlayers) {
               _triggerAITurn(roomCode);
             }
           }
@@ -164,12 +180,14 @@ void _handleRollDice(
   final room = _rooms[rCode];
 
   if (room != null && room.engine.currentPlayer.id == pId) {
-    if (room.engine.players.length < 2) {
+    // 2. Bloqueo de Inicio: Solo si la sala está llena
+    if (room.engine.players.length < room.maxPlayers) {
       if (channel != null) {
-        _sendError(channel, 'Esperando a que se una otro jugador...');
+        _sendError(channel, 'Esperando a que se unan todos los jugadores (${room.engine.players.length}/${room.maxPlayers})...');
       }
       return;
     }
+
     final engine = room.engine;
     final player = engine.players.firstWhere((p) => p.id == pId);
 
@@ -210,7 +228,7 @@ void _handleRollDice(
                 actionMsg = '${player.name} volvió al inicio por una calavera.';
                 break;
               case BoardActionType.moveTo:
-                actionMsg = '${player.name} fuemovido a la casilla ${action.targetNumber}.';
+                actionMsg = '${player.name} fue movido a la casilla ${action.targetNumber}.';
                 break;
               case BoardActionType.skipTurn:
                 actionMsg = '${player.name} perdió el siguiente turno.';
@@ -259,10 +277,10 @@ void _handleRollDice(
           _moveToNextTurnWithSkips(rCode);
         }
 
-        // Si la partida no ha terminado y es turno de IA, disparar
-        if (engine.phase != GamePhase.finished &&
-            engine.currentPlayer.isAI &&
-            !engine.currentPlayer.isFinished) {
+        // 3. Eliminación de Memoria al finalizar
+        if (engine.phase == GamePhase.finished) {
+          _rooms.remove(rCode);
+        } else if (engine.currentPlayer.isAI && !engine.currentPlayer.isFinished) {
           _triggerAITurn(rCode);
         }
       });
@@ -285,6 +303,9 @@ void _moveToNextTurnWithSkips(String roomCode) {
     _moveToNextTurnWithSkips(roomCode); // Salto recursivo
   } else {
     _broadcastGameState(roomCode);
+    if (engine.phase == GamePhase.finished) {
+      _rooms.remove(roomCode);
+    }
   }
 }
 
@@ -301,6 +322,8 @@ void _triggerAITurn(String roomCode) {
   });
 }
 
+// --- Helpers de Comunicación ---
+
 void _broadcastGameEvent(String roomCode, String message) {
   _rooms[roomCode]?.broadcast({
     'event': 'game_event',
@@ -315,6 +338,7 @@ void _broadcastGameState(String roomCode) {
     'event': 'game_state',
     'data': {
       'roomCode': room.code,
+      'maxPlayers': room.maxPlayers, // 2. Información en el Estado
       'phase': room.engine.phase == GamePhase.finished ? 'finished' : 'playing',
       'winners': room.engine.finishedPlayers.map((p) => p.id).toList(),
       'players': room.engine.players.asMap().entries.map((entry) {
@@ -341,6 +365,13 @@ void _broadcastInfo(String roomCode, String message) {
     'event': 'info',
     'data': {'message': message},
   });
+}
+
+void _broadcastInfoToChannel(WebSocketChannel channel, String message) {
+  channel.sink.add(jsonEncode({
+    'event': 'info',
+    'data': {'message': message},
+  }));
 }
 
 void _sendError(WebSocketChannel channel, String message) {
