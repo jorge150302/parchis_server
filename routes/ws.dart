@@ -183,7 +183,11 @@ Future<Response> onRequest(RequestContext context) async {
                     room.engine.players.firstWhere((p) => p.id == clientId);
                 room.broadcast({
                   'event': 'chat',
-                  'data': {'sender': player.name, 'message': data['message']},
+                  'data': {
+                    'sender': player.name,
+                    'senderId': clientId, // <--- NUEVO: Campo solicitado por el frontend
+                    'message': data['message']
+                  },
                 });
               }
             }
@@ -210,7 +214,6 @@ void _handleRollDice(
   final room = _rooms[rCode];
 
   if (room != null) {
-    // 1. VALIDACIÓN DE TURNO Y FASE
     if (room.engine.currentPlayer.id != pId) {
       if (channel != null) _sendError(channel, 'No es tu turno.');
       return;
@@ -231,7 +234,6 @@ void _handleRollDice(
     final player = engine.players.firstWhere((p) => p.id == pId);
 
     if (!player.isFinished && engine.phase != GamePhase.finished) {
-      // Cambiamos fase a moving para bloquear tiros dobles
       engine.phase = GamePhase.moving;
 
       final diceValue = engine.rollDice();
@@ -307,10 +309,10 @@ void _handleRollDice(
 
         if (player.extraTurns > 0) {
           player.extraTurns--;
-          engine.phase = GamePhase.rolling; // Volvemos a fase de tiro
+          engine.phase = GamePhase.rolling; 
           _broadcastGameState(rCode);
         } else if (canRepeat) {
-          engine.phase = GamePhase.rolling; // Volvemos a fase de tiro
+          engine.phase = GamePhase.rolling; 
           _broadcastGameState(rCode);
         } else {
           _moveToNextTurnWithSkips(rCode);
@@ -332,7 +334,7 @@ void _moveToNextTurnWithSkips(String roomCode) {
   final engine = room.engine;
 
   engine.nextTurn();
-  engine.phase = GamePhase.rolling; // Nuevo turno siempre empieza en rolling
+  engine.phase = GamePhase.rolling;
 
   if (engine.currentPlayer.mustSkipTurn && !engine.currentPlayer.isFinished) {
     final player = engine.currentPlayer;
