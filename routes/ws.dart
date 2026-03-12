@@ -35,6 +35,37 @@ final Map<WebSocketChannel, String> _channelToRoom = {};
 
 Future<Response> onRequest(RequestContext context) async {
   final handler = webSocketHandler((channel, protocol) {
+    
+    // Función auxiliar para manejar la desconexión (onDone y onError)
+    void handleDisconnect() {
+      final roomCode = _channelToRoom[channel];
+      final playerId = _channelToPlayer[channel];
+      if (roomCode != null && playerId != null) {
+        final room = _rooms[roomCode];
+        if (room != null) {
+          final player = room.engine.players.firstWhere(
+            (p) => p.id == playerId,
+            orElse: () => Player(id: '', name: ''),
+          );
+          if (player.id.isNotEmpty) {
+            // El jugador sale o se desconecta: pasa a modo IA
+            player.isAI = true;
+            room.clients.remove(playerId);
+            _broadcastGameState(roomCode);
+            _broadcastInfo(roomCode, '${player.name} ha salido. IA al mando.');
+
+            // Si la partida ya empezó y es su turno, la IA debe mover
+            if (room.engine.currentPlayer.id == playerId &&
+                room.engine.players.length == room.maxPlayers) {
+              _triggerAITurn(roomCode);
+            }
+          }
+        }
+      }
+      _channelToPlayer.remove(channel);
+      _channelToRoom.remove(channel);
+    }
+
     channel.stream.listen(
       (dynamic message) {
         try {
@@ -168,29 +199,8 @@ Future<Response> onRequest(RequestContext context) async {
           // Error silencioso
         }
       },
-      onDone: () {
-        final roomCode = _channelToRoom[channel];
-        final playerId = _channelToPlayer[channel];
-        if (roomCode != null && playerId != null) {
-          final room = _rooms[roomCode];
-          if (room != null) {
-            // 3. IA PERSISTENTE: No eliminamos, pasamos a IA
-            final player =
-                room.engine.players.firstWhere((p) => p.id == playerId, orElse: () => Player(id: '', name: ''));
-            if (player.id.isNotEmpty) {
-              player.isAI = true;
-              room.clients.remove(playerId);
-              _broadcastGameState(roomCode);
-              
-              if (room.engine.currentPlayer.id == playerId && room.engine.players.length == room.maxPlayers) {
-                _triggerAITurn(roomCode);
-              }
-            }
-          }
-        }
-        _channelToPlayer.remove(channel);
-        _channelToRoom.remove(channel);
-      },
+      onDone: handleDisconnect,
+      onError: (dynamic error) => handleDisconnect(),
     );
   });
   return handler(context);
