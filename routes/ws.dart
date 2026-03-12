@@ -43,24 +43,24 @@ Future<Response> onRequest(RequestContext context) async {
           final data =
               (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
 
+          // Identificación Raíz: Validamos clientId en cada mensaje
           final clientId = event['clientId'] as String?;
+          if (clientId == null) {
+            _sendError(channel, 'clientId es requerido en la raíz del JSON.');
+            return;
+          }
 
           if (eventName == 'create_game') {
-            if (clientId == null) {
-              _sendError(channel, 'clientId es requerido.');
-              return;
-            }
             final roomCode = (DateTime.now().millisecondsSinceEpoch % 100000)
                 .toString()
                 .padLeft(5, '0');
             final board = generateBoard(classicActionPositions, classicActions);
             final engine = GameEngine(board: board, players: []);
             
-            // 1. Manejo de maxPlayers (Defecto 2)
-            var maxPlayers = (data['maxPlayers'] as int?) ?? 2;
-            
+            // Valor por defecto 2. Si es 4, notificamos.
+            final maxPlayers = (data['maxPlayers'] as int?) ?? 2;
             if (maxPlayers == 4) {
-              _broadcastInfoToChannel(channel, 'Nota: El servidor prefiere partidas de 2 jugadores para mayor fluidez.');
+              _broadcastInfoToChannel(channel, 'Nota: El servidor prefiere partidas de 2 jugadores.');
             }
 
             final room = GameRoom(roomCode, engine, maxPlayers);
@@ -71,6 +71,7 @@ Future<Response> onRequest(RequestContext context) async {
             room.clients[clientId] = channel;
             _channelToPlayer[channel] = clientId;
             _channelToRoom[channel] = roomCode;
+            
             channel.sink.add(
               jsonEncode({
                 'event': 'game_created',
@@ -81,20 +82,45 @@ Future<Response> onRequest(RequestContext context) async {
           }
 
           if (eventName == 'join_game') {
-            if (clientId == null) {
-              _sendError(channel, 'clientId es requerido.');
-              return;
-            }
             final roomCode = data['roomCode'] as String?;
             final room = _rooms[roomCode ?? ''];
             if (room != null && roomCode != null) {
-              // 3. Restricción de re-entrada si terminó
-              if (room.engine.phase == GamePhase.finished) {
-                _sendError(channel, 'La partida ya ha terminado. Sala cerrada.');
+              
+              // 1. PRIORIDAD DE RE-ENTRADA (Independiente de si está llena)
+              final existingPlayerIndex = room.engine.players.indexWhere((p) => p.id == clientId);
+              if (existingPlayerIndex != -1) {
+                final player = room.engine.players[existingPlayerIndex];
+                
+                // 2. Limpieza de ghost sessions
+                final oldChannel = room.clients[clientId];
+                if (oldChannel != null && oldChannel != channel) {
+                  _channelToPlayer.remove(oldChannel);
+                  _channelToRoom.remove(oldChannel);
+                }
+
+                player.isAI = false; 
+                room.clients[clientId] = channel;
+                _channelToPlayer[channel] = clientId;
+                _channelToRoom[channel] = roomCode;
+                
+                channel.sink.add(jsonEncode({
+                  'event': 'game_joined',
+                  'data': {
+                    'playerCount': room.engine.players.length,
+                    'reconnected': true
+                  },
+                }));
+                
+                _broadcastGameState(roomCode);
+                _broadcastInfo(roomCode, '${player.name} ha regresado.');
                 return;
               }
 
-              // 2. Validación de Capacidad
+              if (room.engine.phase == GamePhase.finished) {
+                _sendError(channel, 'La partida ya ha terminado.');
+                return;
+              }
+
               if (room.engine.players.length >= room.maxPlayers) {
                 _sendError(channel, 'La sala está llena.');
                 return;
@@ -116,7 +142,7 @@ Future<Response> onRequest(RequestContext context) async {
               _broadcastGameState(roomCode);
               _broadcastInfo(roomCode, '$playerName se ha unido.');
             } else {
-              _sendError(channel, 'La sala $roomCode no existe o ha sido cerrada.');
+              _sendError(channel, 'La sala no existe o ha sido cerrada.');
             }
           }
 
@@ -126,12 +152,11 @@ Future<Response> onRequest(RequestContext context) async {
 
           if (eventName == 'chat_message') {
             final roomCode = _channelToRoom[channel];
-            final playerId = _channelToPlayer[channel];
-            if (roomCode != null && playerId != null) {
+            if (roomCode != null) {
               final room = _rooms[roomCode];
               if (room != null) {
                 final player =
-                    room.engine.players.firstWhere((p) => p.id == playerId);
+                    room.engine.players.firstWhere((p) => p.id == clientId);
                 room.broadcast({
                   'event': 'chat',
                   'data': {'sender': player.name, 'message': data['message']},
@@ -149,15 +174,17 @@ Future<Response> onRequest(RequestContext context) async {
         if (roomCode != null && playerId != null) {
           final room = _rooms[roomCode];
           if (room != null) {
+            // 3. IA PERSISTENTE: No eliminamos, pasamos a IA
             final player =
-                room.engine.players.firstWhere((p) => p.id == playerId);
-            player.isAI = true;
-            room.clients.remove(playerId);
-            _broadcastInfo(roomCode, '${player.name} desconectado. IA activa.');
-            _broadcastGameState(roomCode);
-            // Solo disparar IA si la partida ya empezó
-            if (room.engine.currentPlayer.id == playerId && room.engine.players.length == room.maxPlayers) {
-              _triggerAITurn(roomCode);
+                room.engine.players.firstWhere((p) => p.id == playerId, orElse: () => Player(id: '', name: ''));
+            if (player.id.isNotEmpty) {
+              player.isAI = true;
+              room.clients.remove(playerId);
+              _broadcastGameState(roomCode);
+              
+              if (room.engine.currentPlayer.id == playerId && room.engine.players.length == room.maxPlayers) {
+                _triggerAITurn(roomCode);
+              }
             }
           }
         }
@@ -180,10 +207,10 @@ void _handleRollDice(
   final room = _rooms[rCode];
 
   if (room != null && room.engine.currentPlayer.id == pId) {
-    // 2. Bloqueo de Inicio: Solo si la sala está llena
+    // Bloqueo de inicio hasta que la sala esté llena
     if (room.engine.players.length < room.maxPlayers) {
       if (channel != null) {
-        _sendError(channel, 'Esperando a que se unan todos los jugadores (${room.engine.players.length}/${room.maxPlayers})...');
+        _sendError(channel, 'Esperando a jugadores (${room.engine.players.length}/${room.maxPlayers})...');
       }
       return;
     }
@@ -195,7 +222,6 @@ void _handleRollDice(
       final diceValue = engine.rollDice();
       _broadcastDiceResult(rCode, diceValue, pId);
 
-      // Gestionar consecutivos 6
       if (diceValue == 6) {
         player.consecutiveSixes++;
       } else {
@@ -203,10 +229,9 @@ void _handleRollDice(
       }
 
       Timer(Duration(milliseconds: player.isAI ? 1500 : 500), () {
-        bool canRepeatTurn = (diceValue == 6);
+        var canRepeat = (diceValue == 6);
         String? actionMsg;
 
-        // Penalización de tres 6
         if (player.consecutiveSixes >= 3) {
           player.resetToStart();
           player.consecutiveSixes = 0;
@@ -241,8 +266,7 @@ void _handleRollDice(
             engine.applyCellAction(player);
           }
 
-          final ateSomeone = engine.resolveCollisions(player);
-          if (ateSomeone) {
+          if (engine.resolveCollisions(player)) {
             actionMsg = '${player.name} capturó una ficha y gana turno extra.';
             player.extraTurns++;
           }
@@ -255,7 +279,6 @@ void _handleRollDice(
             actionMsg = '${player.name} ha llegado a la meta.';
           }
         } else {
-          // No puede moverse
           if (diceValue == 6) {
             actionMsg = '${player.name} sacó un 6 pero no tiene espacio. Tira de nuevo.';
           } else {
@@ -267,19 +290,17 @@ void _handleRollDice(
           _broadcastGameEvent(rCode, actionMsg);
         }
 
-        // Determinar si pasa turno o repite
         if (player.extraTurns > 0) {
           player.extraTurns--;
           _broadcastGameState(rCode);
-        } else if (canRepeatTurn) {
+        } else if (canRepeat) {
           _broadcastGameState(rCode);
         } else {
           _moveToNextTurnWithSkips(rCode);
         }
 
-        // 3. Eliminación de Memoria al finalizar
         if (engine.phase == GamePhase.finished) {
-          _rooms.remove(rCode);
+           _rooms.remove(rCode);
         } else if (engine.currentPlayer.isAI && !engine.currentPlayer.isFinished) {
           _triggerAITurn(rCode);
         }
@@ -295,16 +316,15 @@ void _moveToNextTurnWithSkips(String roomCode) {
 
   engine.nextTurn();
   
-  // Si el nuevo jugador actual debe saltar turno
   if (engine.currentPlayer.mustSkipTurn && !engine.currentPlayer.isFinished) {
     final player = engine.currentPlayer;
     player.consumeSkip();
-    _broadcastGameEvent(roomCode, '${player.name} salta su turno. Le quedan ${player.skippedTurns} saltos.');
-    _moveToNextTurnWithSkips(roomCode); // Salto recursivo
+    _broadcastGameEvent(roomCode, '${player.name} salta su turno.');
+    _moveToNextTurnWithSkips(roomCode); 
   } else {
     _broadcastGameState(roomCode);
     if (engine.phase == GamePhase.finished) {
-      _rooms.remove(roomCode);
+       _rooms.remove(roomCode);
     }
   }
 }
@@ -334,12 +354,22 @@ void _broadcastGameEvent(String roomCode, String message) {
 void _broadcastGameState(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
+
+  // 5. FASES DETALLADAS
+  String phaseStr = 'idle';
+  switch (room.engine.phase) {
+    case GamePhase.idle: phaseStr = 'idle'; break;
+    case GamePhase.rolling: phaseStr = 'rolling'; break;
+    case GamePhase.moving: phaseStr = 'moving'; break;
+    case GamePhase.finished: phaseStr = 'finished'; break;
+  }
+
   room.broadcast({
     'event': 'game_state',
     'data': {
       'roomCode': room.code,
-      'maxPlayers': room.maxPlayers, // 2. Información en el Estado
-      'phase': room.engine.phase == GamePhase.finished ? 'finished' : 'playing',
+      'maxPlayers': room.maxPlayers,
+      'phase': phaseStr,
       'winners': room.engine.finishedPlayers.map((p) => p.id).toList(),
       'players': room.engine.players.asMap().entries.map((entry) {
         final index = entry.key;
