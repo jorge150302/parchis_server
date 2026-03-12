@@ -36,7 +36,6 @@ final Map<WebSocketChannel, String> _channelToRoom = {};
 Future<Response> onRequest(RequestContext context) async {
   final handler = webSocketHandler((channel, protocol) {
     
-    // Función auxiliar para manejar la desconexión (onDone y onError)
     void handleDisconnect() {
       final roomCode = _channelToRoom[channel];
       final playerId = _channelToPlayer[channel];
@@ -48,13 +47,11 @@ Future<Response> onRequest(RequestContext context) async {
             orElse: () => Player(id: '', name: ''),
           );
           if (player.id.isNotEmpty) {
-            // El jugador sale o se desconecta: pasa a modo IA
             player.isAI = true;
             room.clients.remove(playerId);
             _broadcastGameState(roomCode);
             _broadcastInfo(roomCode, '${player.name} ha salido. IA al mando.');
 
-            // Si la partida ya empezó y es su turno, la IA debe mover
             if (room.engine.currentPlayer.id == playerId &&
                 room.engine.players.length == room.maxPlayers) {
               _triggerAITurn(roomCode);
@@ -74,7 +71,6 @@ Future<Response> onRequest(RequestContext context) async {
           final data =
               (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
 
-          // Identificación Raíz: Validamos clientId en cada mensaje
           final clientId = event['clientId'] as String?;
           if (clientId == null) {
             _sendError(channel, 'clientId es requerido en la raíz del JSON.');
@@ -88,7 +84,6 @@ Future<Response> onRequest(RequestContext context) async {
             final board = generateBoard(classicActionPositions, classicActions);
             final engine = GameEngine(board: board, players: []);
             
-            // Valor por defecto 2. Si es 4, notificamos.
             final maxPlayers = (data['maxPlayers'] as int?) ?? 2;
             if (maxPlayers == 4) {
               _broadcastInfoToChannel(channel, 'Nota: El servidor prefiere partidas de 2 jugadores.');
@@ -117,12 +112,10 @@ Future<Response> onRequest(RequestContext context) async {
             final room = _rooms[roomCode ?? ''];
             if (room != null && roomCode != null) {
               
-              // 1. PRIORIDAD DE RE-ENTRADA (Independiente de si está llena)
               final existingPlayerIndex = room.engine.players.indexWhere((p) => p.id == clientId);
               if (existingPlayerIndex != -1) {
                 final player = room.engine.players[existingPlayerIndex];
                 
-                // 2. Limpieza de ghost sessions
                 final oldChannel = room.clients[clientId];
                 if (oldChannel != null && oldChannel != channel) {
                   _channelToPlayer.remove(oldChannel);
@@ -216,8 +209,17 @@ void _handleRollDice(
   if (rCode == null || pId == null) return;
   final room = _rooms[rCode];
 
-  if (room != null && room.engine.currentPlayer.id == pId) {
-    // Bloqueo de inicio hasta que la sala esté llena
+  if (room != null) {
+    // 1. VALIDACIÓN DE TURNO Y FASE
+    if (room.engine.currentPlayer.id != pId) {
+      if (channel != null) _sendError(channel, 'No es tu turno.');
+      return;
+    }
+    if (room.engine.phase != GamePhase.rolling && room.engine.phase != GamePhase.idle) {
+      if (channel != null) _sendError(channel, 'Acción no permitida en esta fase.');
+      return;
+    }
+
     if (room.engine.players.length < room.maxPlayers) {
       if (channel != null) {
         _sendError(channel, 'Esperando a jugadores (${room.engine.players.length}/${room.maxPlayers})...');
@@ -229,6 +231,9 @@ void _handleRollDice(
     final player = engine.players.firstWhere((p) => p.id == pId);
 
     if (!player.isFinished && engine.phase != GamePhase.finished) {
+      // Cambiamos fase a moving para bloquear tiros dobles
+      engine.phase = GamePhase.moving;
+
       final diceValue = engine.rollDice();
       _broadcastDiceResult(rCode, diceValue, pId);
 
@@ -302,8 +307,10 @@ void _handleRollDice(
 
         if (player.extraTurns > 0) {
           player.extraTurns--;
+          engine.phase = GamePhase.rolling; // Volvemos a fase de tiro
           _broadcastGameState(rCode);
         } else if (canRepeat) {
+          engine.phase = GamePhase.rolling; // Volvemos a fase de tiro
           _broadcastGameState(rCode);
         } else {
           _moveToNextTurnWithSkips(rCode);
@@ -325,7 +332,8 @@ void _moveToNextTurnWithSkips(String roomCode) {
   final engine = room.engine;
 
   engine.nextTurn();
-  
+  engine.phase = GamePhase.rolling; // Nuevo turno siempre empieza en rolling
+
   if (engine.currentPlayer.mustSkipTurn && !engine.currentPlayer.isFinished) {
     final player = engine.currentPlayer;
     player.consumeSkip();
@@ -365,7 +373,6 @@ void _broadcastGameState(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
 
-  // 5. FASES DETALLADAS
   String phaseStr = 'idle';
   switch (room.engine.phase) {
     case GamePhase.idle: phaseStr = 'idle'; break;
