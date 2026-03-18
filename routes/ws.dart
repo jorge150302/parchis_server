@@ -252,7 +252,7 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
       if (diceValue == 6) player.consecutiveSixes++; else player.consecutiveSixes = 0;
 
       Timer(Duration(milliseconds: player.isAI ? 1500 : 500), () {
-        var canRepeat = (diceValue == 6);
+        final canRepeat = diceValue == 6;
         String? actionMsg;
 
         if (player.consecutiveSixes >= 3) {
@@ -265,28 +265,65 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
 
         if (engine.canMove(player, diceValue)) {
           for (var i = 0; i < diceValue; i++) engine.stepForward(player);
+
           final cell = engine.board.getCell(player.position);
           if (cell.action != null) {
             final action = cell.action!;
             switch (action.type) {
-              case BoardActionType.goToStart: actionMsg = '${player.name} volvió al inicio.'; break;
-              case BoardActionType.moveTo: actionMsg = '${player.name} fue movido a la casilla ${action.targetNumber}.'; break;
-              case BoardActionType.skipTurn: actionMsg = '${player.name} perdió el turno.'; break;
-              case BoardActionType.rollAgain: actionMsg = '${player.name} repite turno.'; player.extraTurns++; break;
+              case BoardActionType.goToStart:
+                actionMsg = '${player.name} cayó en una casilla de "Volver a casa".';
+                break;
+              case BoardActionType.moveTo:
+                final target = action.targetNumber ?? 0;
+                if (target > player.position) {
+                  actionMsg = '${player.name} avanza hasta la casilla $target.';
+                } else {
+                  actionMsg = '${player.name} retrocede hasta la casilla $target.';
+                }
+                break;
+              case BoardActionType.skipTurn:
+                actionMsg = '${player.name} ha caído en una casilla de "Perder turno".';
+                break;
+              case BoardActionType.rollAgain:
+                actionMsg = '${player.name} puede volver a tirar.';
+                player.extraTurns++;
+                break;
             }
             engine.applyCellAction(player);
           }
-          if (engine.resolveCollisions(player)) { actionMsg = '${player.name} capturó ficha.'; player.extraTurns++; }
-          if (diceValue == 6 && actionMsg == null) actionMsg = '${player.name} sacó un 6.';
-          if (player.isFinished) actionMsg = '${player.name} llegó a la meta.';
+
+          if (engine.resolveCollisions(player)) {
+            final captureMsg = '${player.name} ha capturado una ficha.';
+            actionMsg = (actionMsg == null) ? captureMsg : '$actionMsg y $captureMsg';
+            player.extraTurns++;
+          }
+
+          if (player.isFinished) {
+            final finishMsg = '${player.name} ha llegado a la meta.';
+            actionMsg = (actionMsg == null) ? finishMsg : '$actionMsg. Además, $finishMsg';
+          }
+
+          if (diceValue == 6 && actionMsg == null) {
+            actionMsg = '${player.name} sacó un 6 y repite turno.';
+          }
         } else if (diceValue == 6) {
-          actionMsg = '${player.name} sacó un 6 pero no tiene espacio.';
+          actionMsg = '${player.name} sacó un 6 pero no tiene movimientos posibles.';
         }
 
         if (actionMsg != null) _broadcastGameEvent(rCode, actionMsg);
-        if (player.extraTurns > 0) { player.extraTurns--; engine.phase = GamePhase.rolling; _broadcastGameState(rCode); }
-        else if (canRepeat) { engine.phase = GamePhase.rolling; _broadcastGameState(rCode); }
-        else _moveToNextTurnWithSkips(rCode);
+
+        if (player.extraTurns > 0) {
+          player.extraTurns--;
+          engine.phase = GamePhase.rolling;
+          _broadcastGameState(rCode);
+        }
+        else if (canRepeat) {
+          engine.phase = GamePhase.rolling;
+          _broadcastGameState(rCode);
+        }
+        else {
+          _moveToNextTurnWithSkips(rCode);
+        }
 
         if (engine.phase == GamePhase.finished) _rooms.remove(rCode);
         else if (engine.currentPlayer.isAI && !engine.currentPlayer.isFinished) _triggerAITurn(rCode);
@@ -303,8 +340,9 @@ void _moveToNextTurnWithSkips(String roomCode) {
   engine.phase = GamePhase.rolling;
   if (engine.currentPlayer.mustSkipTurn && !engine.currentPlayer.isFinished) {
     engine.currentPlayer.consumeSkip();
-    _broadcastGameEvent(roomCode, '${engine.currentPlayer.name} salta turno.');
-    _moveToNextTurnWithSkips(roomCode); 
+    _broadcastGameEvent(roomCode, '${engine.currentPlayer.name} salta el turno por estar penalizado.');
+    // Pequeño delay para que se vea el mensaje de salto de turno antes del siguiente
+    Timer(const Duration(milliseconds: 1000), () => _moveToNextTurnWithSkips(roomCode));
   } else {
     _broadcastGameState(roomCode);
     if (engine.phase == GamePhase.finished) _rooms.remove(roomCode);
