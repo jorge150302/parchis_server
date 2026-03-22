@@ -2,7 +2,6 @@
 
 import 'dart:math';
 
-// Copiaremos estos modelos a continuación
 import 'models/board.dart';
 import 'models/player.dart';
 import 'models/board_action.dart';
@@ -10,6 +9,7 @@ import 'models/board_action.dart';
 enum GamePhase {
   idle,
   rolling,
+  choosingToken,
   moving,
   finished,
 }
@@ -22,6 +22,7 @@ class GameEngine {
 
   int _currentPlayerIndex = 0;
   GamePhase phase = GamePhase.idle;
+  int lastDiceValue = 0;
 
   GameEngine({
     required this.board,
@@ -30,14 +31,19 @@ class GameEngine {
 
   Player get currentPlayer => players[_currentPlayerIndex];
 
-  int rollDice() => _random.nextInt(6) + 1;
+  int rollDice() {
+    lastDiceValue = _random.nextInt(6) + 1;
+    return lastDiceValue;
+  }
 
   void nextTurn() {
-    if (players.where((p) => !p.isFinished).length <= 1) {
+    final remainingPlayers = players.where((p) => !p.isFinished).length;
+    if (remainingPlayers <= 1) {
       phase = GamePhase.finished;
-      final lastPlayer = players.firstWhere((p) => !p.isFinished);
-      if (!finishedPlayers.contains(lastPlayer)) {
-        finishedPlayers.add(lastPlayer);
+      for (final p in players) {
+        if (!p.isFinished && !finishedPlayers.contains(p)) {
+          finishedPlayers.add(p);
+        }
       }
       return;
     }
@@ -45,6 +51,8 @@ class GameEngine {
     do {
       _currentPlayerIndex = (_currentPlayerIndex + 1) % players.length;
     } while (currentPlayer.isFinished);
+    
+    phase = GamePhase.rolling;
   }
 
   void registerSix(Player player, int diceValue) {
@@ -57,46 +65,94 @@ class GameEngine {
 
   bool reachedThreeSixes(Player player) => player.consecutiveSixes >= 3;
 
-  bool penaltyThreeSixes(Player player) {
+  void penaltyThreeSixes(Player player) {
     player.resetToStart();
-    // En el servidor, manejaremos los eventos de forma diferente
-    return true;
   }
 
-  bool canMove(Player player, int steps) {
-    return player.position + steps <= board.finalPosition;
-  }
-
-  void stepForward(Player player) {
-    if (player.position < board.finalPosition) {
-      player.moveBy(1);
-      if (player.position == board.finalPosition) {
-        player.finish();
-        if (!finishedPlayers.contains(player)) {
-          finishedPlayers.add(player);
+  /// Verifica si una casilla tiene un puente.
+  /// En la zona común bloquea a todos. En la zona privada (> 68) solo al dueño.
+  bool isBridge(int position, Player movingPlayer) {
+    if (position <= 0 || position >= board.finalPosition) return false;
+    
+    for (final player in players) {
+      final tokensAtPos = player.tokens.where((t) => !t.isFinished && t.position == position).length;
+      if (tokensAtPos >= 2) {
+        // REGLA: Pasillo de Meta (Zona Privada). 
+        // Si la posición es mayor a 68, solo bloquea si el puente es del propio jugador.
+        if (position > 68) {
+          if (player.id == movingPlayer.id) return true;
+        } else {
+          // Zona común: cualquier puente bloquea a cualquiera.
+          return true;
         }
       }
     }
+    return false;
   }
 
-  void stopMoving(Player player) {
-    player.isMoving = false;
+  bool canMove(Token token, int steps) {
+    if (token.isFinished) return false;
+    
+    // REGLA: Si la ficha está en casa (0), solo puede salir si el dado es un 5.
+    // DESACTIVADO TEMPORALMENTE: Para pruebas del tablero corto.
+    // if (token.position == 0 && steps != 5) return false;
+
+    final targetPos = token.position + steps;
+    
+    // REGLA: Tiro exacto para entrar a la meta.
+    if (targetPos > board.finalPosition) return false;
+
+    // REGLA: Puentes (Bloqueos). No se puede saltar ni caer en un puente.
+    for (int i = 1; i <= steps; i++) {
+      int checkPos = token.position + i;
+      if (isBridge(checkPos, currentPlayer)) return false;
+    }
+
+    return true;
   }
 
-  bool applyCellAction(Player player) {
-    final cell = board.getCell(player.position);
+  bool canMoveAnyToken(Player player, int steps) {
+    return player.tokens.any((token) => canMove(token, steps));
+  }
+
+  /// Mueve un paso y asegura que el estado isFinished se marque correctamente.
+  bool stepForward(Token token) {
+    if (token.position < board.finalPosition) {
+      token.position++;
+      if (token.position == board.finalPosition) {
+        token.isFinished = true;
+        if (currentPlayer.isFinished) {
+          if (!finishedPlayers.contains(currentPlayer)) {
+            finishedPlayers.add(currentPlayer);
+          }
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool applyCellAction(Player player, Token token) {
+    final cell = board.getCell(token.position);
     final action = cell.action;
     bool sentHome = false;
 
     if (action != null) {
       switch (action.type) {
         case BoardActionType.goToStart:
-          player.resetToStart();
+          token.reset();
           sentHome = true;
           break;
         case BoardActionType.moveTo:
           if (action.targetNumber != null) {
-            player.position = action.targetNumber!;
+            token.position = action.targetNumber!;
+            if (token.position >= board.finalPosition) {
+              token.position = board.finalPosition;
+              token.isFinished = true;
+              if (player.isFinished && !finishedPlayers.contains(player)) {
+                finishedPlayers.add(player);
+              }
+            }
           }
           break;
         case BoardActionType.skipTurn:
@@ -110,15 +166,23 @@ class GameEngine {
     return sentHome;
   }
 
-  bool resolveCollisions(Player player) {
-    if (player.isFinished) return false;
+  bool resolveCollisions(Token token) {
+    if (token.isFinished) return false;
 
-    final playersInCell = players.where((p) => p != player && p.position == player.position).toList();
     bool sentHome = false;
+    for (final otherPlayer in players) {
+      // REGLA: No hay "Fuego Amigo". No capturamos fichas propias.
+      if (otherPlayer.id == currentPlayer.id) continue;
 
-    for (final otherPlayer in playersInCell) {
-      otherPlayer.resetToStart();
-      sentHome = true;
+      for (final otherToken in otherPlayer.tokens) {
+        if (otherToken.isFinished) continue;
+        if (otherToken.position == 0) continue;
+
+        if (otherToken.position == token.position) {
+          otherToken.reset();
+          sentHome = true;
+        }
+      }
     }
     return sentHome;
   }

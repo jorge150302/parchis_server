@@ -1,52 +1,61 @@
 // Contenido para parchis_server/lib/models/player.dart
 
+class Token {
+  final int id;
+  int position;
+  bool isFinished;
+
+  Token({
+    required this.id,
+    this.position = 0,
+    this.isFinished = false,
+  });
+
+  void reset() {
+    position = 0;
+    isFinished = false;
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'position': position,
+        'isFinished': isFinished,
+      };
+}
+
 class Player {
   final String id;
   final String name;
 
-  int position;
+  List<Token> tokens;
   int skippedTurns;
   int consecutiveSixes;
   int extraTurns;
-  bool isFinished;
-  bool isMoving;
-  int stepsMoved;
   bool isAI;
 
   Player({
     required this.id,
     required this.name,
-    this.position = 0,
+    int numTokens = 2,
     this.skippedTurns = 0,
     this.consecutiveSixes = 0,
     this.extraTurns = 0,
-    this.isFinished = false,
-    this.isMoving = false,
-    this.stepsMoved = 0,
     this.isAI = false,
-  });
+  }) : tokens = List.generate(numTokens, (i) => Token(id: i));
 
   void resetToStart() {
-    position = 0;
+    for (final token in tokens) {
+      token.reset();
+    }
     skippedTurns = 0;
     consecutiveSixes = 0;
     extraTurns = 0;
-    isFinished = false;
-    isMoving = false;
-    stepsMoved = 0;
   }
 
-  void moveBy(int steps) {
-    position += steps;
-    stepsMoved += steps;
-  }
+  bool get isFinished => tokens.every((t) => t.isFinished);
 
   void addSkip(int turns) {
     skippedTurns += turns;
-  }
-
-  void finish() {
-    isFinished = true;
   }
 
   bool get mustSkipTurn => skippedTurns > 0;
@@ -58,7 +67,7 @@ class Player {
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
-        'position': position,
+        'tokens': tokens.map((t) => t.toJson()).toList(),
         'isFinished': isFinished,
         'isAI': isAI,
         'skippedTurns': skippedTurns,

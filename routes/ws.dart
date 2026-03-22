@@ -78,7 +78,6 @@ Future<Response> onRequest(RequestContext context) async {
             return;
           }
 
-          // 1. EVENTO: find_match (Matchmaking)
           if (eventName == 'find_match') {
             final targetMaxPlayers = (data['maxPlayers'] as int?) ?? 2;
             
@@ -96,7 +95,6 @@ Future<Response> onRequest(RequestContext context) async {
             if (foundRoom != null) {
               _joinToRoom(channel, foundRoom, clientId, data['name'] as String?);
             } else {
-              // NO CREAR AUTOMÁTICAMENTE - DEVOLVER ERROR ESPECÍFICO
               channel.sink.add(jsonEncode({
                 'event': 'error',
                 'data': {
@@ -126,6 +124,15 @@ Future<Response> onRequest(RequestContext context) async {
 
           if (eventName == 'roll_dice') {
             _handleRollDice(channel);
+          }
+
+          if (eventName == 'move_token') {
+            final tokenId = data['tokenId'] as int?;
+            if (tokenId != null) {
+              _handleMoveToken(channel, tokenId);
+            } else {
+              _sendError(channel, 'tokenId es requerido.');
+            }
           }
 
           if (eventName == 'chat_message') {
@@ -245,114 +252,150 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
     final player = engine.players.firstWhere((p) => p.id == pId);
 
     if (!player.isFinished && engine.phase != GamePhase.finished) {
-      engine.phase = GamePhase.moving;
       final diceValue = engine.rollDice();
       _broadcastDiceResult(rCode, diceValue, pId);
 
-      if (diceValue == 6) player.consecutiveSixes++; else player.consecutiveSixes = 0;
+      engine.registerSix(player, diceValue);
 
-      Timer(Duration(milliseconds: player.isAI ? 1500 : 500), () {
-        final canRepeat = diceValue == 6;
-        String? actionMsg;
+      if (player.consecutiveSixes >= 3) {
+        engine.penaltyThreeSixes(player);
+        _broadcastGameEvent(rCode, '${player.name} sacó tres 6 y sus fichas vuelven al inicio.');
+        _moveToNextTurnWithSkips(rCode);
+        return;
+      }
 
-        if (player.consecutiveSixes >= 3) {
-          player.resetToStart();
-          player.consecutiveSixes = 0;
-          _broadcastGameEvent(rCode, '${player.name} sacó tres 6 y vuelve al inicio.');
-          _moveToNextTurnWithSkips(rCode);
-          return;
+      if (engine.canMoveAnyToken(player, diceValue)) {
+        engine.phase = GamePhase.choosingToken;
+        _broadcastGameState(rCode);
+        
+        if (player.isAI) {
+           Timer(const Duration(seconds: 1), () {
+             final validToken = player.tokens.firstWhere((t) => engine.canMove(t, diceValue));
+             _handleMoveToken(null, validToken.id, roomCode: rCode, playerId: pId);
+           });
         }
-
-        if (engine.canMove(player, diceValue)) {
-          for (var i = 0; i < diceValue; i++) engine.stepForward(player);
-
-          final cell = engine.board.getCell(player.position);
-          if (cell.action != null) {
-            final action = cell.action!;
-            switch (action.type) {
-              case BoardActionType.goToStart:
-                actionMsg = '${player.name} cayó en una casilla de "Volver a casa".';
-                break;
-              case BoardActionType.moveTo:
-                final target = action.targetNumber ?? 0;
-                if (target > player.position) {
-                  actionMsg = '${player.name} avanza hasta la casilla $target.';
-                } else {
-                  actionMsg = '${player.name} retrocede hasta la casilla $target.';
-                }
-                break;
-              case BoardActionType.skipTurn:
-                actionMsg = '${player.name} ha caído en una casilla de "Perder turno".';
-                break;
-              case BoardActionType.rollAgain:
-                actionMsg = '${player.name} puede volver a tirar.';
-                player.extraTurns++;
-                break;
-            }
-            engine.applyCellAction(player);
-          }
-
-          if (engine.resolveCollisions(player)) {
-            final captureMsg = '${player.name} ha capturado una ficha.';
-            actionMsg = (actionMsg == null) ? captureMsg : '$actionMsg y $captureMsg';
-            player.extraTurns++;
-          }
-
-          if (player.isFinished) {
-            final finishMsg = '${player.name} ha llegado a la meta.';
-            actionMsg = (actionMsg == null) ? finishMsg : '$actionMsg. Además, $finishMsg';
-          }
-
-          if (diceValue == 6 && actionMsg == null) {
-            actionMsg = '${player.name} sacó un 6 y repite turno.';
-          }
-        } else if (diceValue == 6) {
-          actionMsg = '${player.name} sacó un 6 pero no tiene movimientos posibles.';
+      } else {
+        String msg = '${player.name} sacó un $diceValue pero no puede mover ninguna ficha.';
+        _broadcastGameEvent(rCode, msg);
+        if (diceValue == 6) {
+           engine.phase = GamePhase.rolling;
+           _broadcastGameState(rCode);
+        } else {
+           _moveToNextTurnWithSkips(rCode);
         }
-
-        if (actionMsg != null) _broadcastGameEvent(rCode, actionMsg);
-
-        if (player.extraTurns > 0) {
-          player.extraTurns--;
-          engine.phase = GamePhase.rolling;
-          _broadcastGameState(rCode);
-        }
-        else if (canRepeat) {
-          engine.phase = GamePhase.rolling;
-          _broadcastGameState(rCode);
-        }
-        else {
-          _moveToNextTurnWithSkips(rCode);
-        }
-
-        if (engine.phase == GamePhase.finished) _rooms.remove(rCode);
-        else if (engine.currentPlayer.isAI && !engine.currentPlayer.isFinished) _triggerAITurn(rCode);
-      });
+      }
     }
   }
+}
+
+void _handleMoveToken(WebSocketChannel? channel, int tokenId, {String? roomCode, String? playerId}) {
+  final rCode = roomCode ?? _channelToRoom[channel];
+  final pId = playerId ?? _channelToPlayer[channel];
+  if (rCode == null || pId == null) return;
+  final room = _rooms[rCode];
+  if (room == null) return;
+
+  final engine = room.engine;
+  final player = engine.players.firstWhere((p) => p.id == pId);
+
+  if (engine.currentPlayer.id != pId || engine.phase != GamePhase.choosingToken) {
+    if (channel != null) _sendError(channel, 'No es el momento de mover.');
+    return;
+  }
+
+  final token = player.tokens.firstWhere((t) => t.id == tokenId, orElse: () => throw 'Token no encontrado');
+  final diceValue = engine.lastDiceValue;
+
+  if (!engine.canMove(token, diceValue)) {
+    if (channel != null) _sendError(channel, 'Esa ficha no se puede mover.');
+    return;
+  }
+
+  engine.phase = GamePhase.moving;
+  _broadcastGameState(rCode);
+
+  Timer(const Duration(milliseconds: 500), () {
+    final canRepeat = (diceValue == 6);
+    String? actionMsg;
+
+    for (var i = 0; i < diceValue; i++) engine.stepForward(token);
+    
+    final cell = engine.board.getCell(token.position);
+    if (cell.action != null) {
+      final action = cell.action!;
+      switch (action.type) {
+        case BoardActionType.goToStart: actionMsg = '${player.name} volvió al inicio.'; break;
+        case BoardActionType.moveTo: actionMsg = '${player.name} avanzó/retrocedió por casilla de acción.'; break;
+        case BoardActionType.skipTurn: actionMsg = '${player.name} perdió el turno.'; break;
+        case BoardActionType.rollAgain: actionMsg = '${player.name} repite turno por casilla.'; player.extraTurns++; break;
+      }
+      engine.applyCellAction(player, token);
+    }
+
+    if (engine.resolveCollisions(token)) {
+      final captureMsg = '${player.name} capturó una ficha.';
+      actionMsg = (actionMsg == null) ? captureMsg : '$actionMsg y $captureMsg';
+      player.extraTurns++;
+    }
+
+    if (token.isFinished) {
+       final finishMsg = '¡Una ficha de ${player.name} llegó a la meta!';
+       actionMsg = (actionMsg == null) ? finishMsg : '$actionMsg. $finishMsg';
+       player.extraTurns++;
+    }
+
+    if (actionMsg != null) _broadcastGameEvent(rCode, actionMsg);
+
+    // CRUCIAL: Si el jugador ha terminado, ignorar turnos extra y pasar turno / finalizar juego
+    if (player.isFinished) {
+      player.extraTurns = 0;
+      _moveToNextTurnWithSkips(rCode);
+    } else if (player.extraTurns > 0) {
+      player.extraTurns--;
+      engine.phase = GamePhase.rolling;
+      _broadcastGameState(rCode);
+    } else if (canRepeat) {
+      engine.phase = GamePhase.rolling;
+      _broadcastGameState(rCode);
+    } else {
+      _moveToNextTurnWithSkips(rCode);
+    }
+
+    if (engine.phase == GamePhase.finished) {
+      _broadcastGameEvent(rCode, '¡${player.name} ha terminado!');
+      Timer(const Duration(seconds: 10), () => _rooms.remove(rCode));
+    } else if (engine.currentPlayer.isAI && !engine.currentPlayer.isFinished) {
+      _triggerAITurn(rCode);
+    }
+  });
 }
 
 void _moveToNextTurnWithSkips(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
   final engine = room.engine;
-  engine.nextTurn();
-  engine.phase = GamePhase.rolling;
-  if (engine.currentPlayer.mustSkipTurn && !engine.currentPlayer.isFinished) {
-    engine.currentPlayer.consumeSkip();
-    _broadcastGameEvent(roomCode, '${engine.currentPlayer.name} salta el turno por estar penalizado.');
-    // Pequeño delay para que se vea el mensaje de salto de turno antes del siguiente
-    Timer(const Duration(milliseconds: 1000), () => _moveToNextTurnWithSkips(roomCode));
-  } else {
-    _broadcastGameState(roomCode);
-    if (engine.phase == GamePhase.finished) _rooms.remove(roomCode);
-  }
+
+  bool skipHappened = false;
+  do {
+    engine.nextTurn();
+    if (engine.phase == GamePhase.finished) break;
+
+    if (engine.currentPlayer.mustSkipTurn && !engine.currentPlayer.isFinished) {
+      engine.currentPlayer.consumeSkip();
+      _broadcastGameEvent(roomCode, '${engine.currentPlayer.name} salta el turno.');
+      skipHappened = true;
+    } else {
+      skipHappened = false;
+    }
+  } while (skipHappened);
+
+  _broadcastGameState(roomCode);
 }
 
 void _triggerAITurn(String roomCode) {
   Timer(const Duration(seconds: 2), () {
     final room = _rooms[roomCode];
-    if (room != null && room.engine.phase != GamePhase.finished) {
+    if (room != null && room.engine.phase == GamePhase.rolling) {
       _handleRollDice(null, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
     }
   });
@@ -375,6 +418,7 @@ void _broadcastGameState(String roomCode) {
   switch (room.engine.phase) {
     case GamePhase.idle: phaseStr = 'idle'; break;
     case GamePhase.rolling: phaseStr = 'rolling'; break;
+    case GamePhase.choosingToken: phaseStr = 'choosing_token'; break;
     case GamePhase.moving: phaseStr = 'moving'; break;
     case GamePhase.finished: phaseStr = 'finished'; break;
   }
@@ -394,6 +438,7 @@ void _broadcastGameState(String roomCode) {
         return json;
       }).toList(),
       'currentPlayerId': room.engine.currentPlayer.id,
+      'lastDiceValue': room.engine.lastDiceValue,
     },
   });
 }
