@@ -20,11 +20,51 @@ class GameRoom {
   bool isPublic;
   final Map<String, WebSocketChannel> clients = {}; // PlayerID -> Channel
 
+  Timer? turnTimer;
+  int remainingSeconds = 20;
+
   void broadcast(Map<String, dynamic> event) {
     final message = jsonEncode(event);
     for (final channel in clients.values) {
       channel.sink.add(message);
     }
+  }
+
+  void stopTimer() {
+    turnTimer?.cancel();
+    turnTimer = null;
+  }
+
+  void startTimer(void Function() onTimeout) {
+    stopTimer();
+    
+    final currentPlayer = engine.currentPlayer;
+    
+    // Si el jugador es IA o está desconectado, jugamos instantáneamente
+    if (currentPlayer.isAI) {
+      onTimeout();
+      return;
+    }
+
+    remainingSeconds = 20;
+    _broadcastTimer();
+
+    turnTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      remainingSeconds--;
+      if (remainingSeconds <= 0) {
+        stopTimer();
+        onTimeout();
+      } else {
+        _broadcastTimer();
+      }
+    });
+  }
+
+  void _broadcastTimer() {
+    broadcast({
+      'event': 'timer_update',
+      'data': {'seconds': remainingSeconds},
+    });
   }
 }
 
@@ -53,9 +93,9 @@ Future<Response> onRequest(RequestContext context) async {
             _broadcastGameState(roomCode);
             _broadcastInfo(roomCode, '${player.name} ha salido. IA al mando.');
 
-            if (room.engine.currentPlayer.id == playerId &&
-                room.engine.players.length == room.maxPlayers) {
-              _triggerAITurn(roomCode);
+            // Si era su turno, el temporizador de GameRoom detectará isAI y jugará al instante
+            if (room.engine.currentPlayer.id == playerId) {
+              room.startTimer(() => _handleTimeout(roomCode));
             }
           }
         }
@@ -99,7 +139,7 @@ Future<Response> onRequest(RequestContext context) async {
                 'event': 'error',
                 'data': {
                   'code': 'MATCH_NOT_FOUND',
-                  'message': 'No se encontraron salas públicas disponibles para $targetMaxPlayers jugadores.'
+                  'message': 'No se encontraron salas públicas disponibles.'
                 }
               }));
             }
@@ -118,7 +158,7 @@ Future<Response> onRequest(RequestContext context) async {
             if (room != null) {
               _joinToRoom(channel, room, clientId, data['name'] as String?);
             } else {
-              _sendError(channel, 'La sala no existe o ha sido cerrada.');
+              _sendError(channel, 'La sala no existe.');
             }
           }
 
@@ -131,7 +171,7 @@ Future<Response> onRequest(RequestContext context) async {
             if (tokenId != null) {
               _handleMoveToken(channel, tokenId);
             } else {
-              _sendError(channel, 'tokenId es requerido.');
+              _sendError(channel, 'tokenId requerido.');
             }
           }
 
@@ -140,8 +180,7 @@ Future<Response> onRequest(RequestContext context) async {
             if (roomCode != null) {
               final room = _rooms[roomCode];
               if (room != null) {
-                final player =
-                    room.engine.players.firstWhere((p) => p.id == clientId);
+                final player = room.engine.players.firstWhere((p) => p.id == clientId);
                 room.broadcast({
                   'event': 'chat',
                   'data': {
@@ -206,6 +245,10 @@ void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, Strin
       'data': {'playerCount': room.engine.players.length, 'reconnected': true},
     }));
     _broadcastGameState(room.code);
+    
+    if (room.engine.currentPlayer.id == clientId && room.engine.phase != GamePhase.idle) {
+      room.startTimer(() => _handleTimeout(room.code));
+    }
     return;
   }
 
@@ -225,7 +268,12 @@ void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, Strin
     'data': {'playerCount': room.engine.players.length},
   }));
   _broadcastGameState(room.code);
-  _broadcastInfo(room.code, '$playerName se ha unido.');
+
+  if (room.engine.players.length == room.maxPlayers) {
+    room.engine.phase = GamePhase.rolling;
+    _broadcastGameState(room.code);
+    room.startTimer(() => _handleTimeout(room.code));
+  }
 }
 
 void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playerId}) {
@@ -243,18 +291,14 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
       if (channel != null) _sendError(channel, 'Acción no permitida.');
       return;
     }
-    if (room.engine.players.length < room.maxPlayers) {
-      if (channel != null) _sendError(channel, 'Esperando jugadores...');
-      return;
-    }
-
+    
+    room.stopTimer();
     final engine = room.engine;
     final player = engine.players.firstWhere((p) => p.id == pId);
 
     if (!player.isFinished && engine.phase != GamePhase.finished) {
       final diceValue = engine.rollDice();
       _broadcastDiceResult(rCode, diceValue, pId);
-
       engine.registerSix(player, diceValue);
 
       if (player.consecutiveSixes >= 3) {
@@ -267,19 +311,14 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
       if (engine.canMoveAnyToken(player, diceValue)) {
         engine.phase = GamePhase.choosingToken;
         _broadcastGameState(rCode);
-        
-        if (player.isAI) {
-           Timer(const Duration(seconds: 1), () {
-             final validToken = player.tokens.firstWhere((t) => engine.canMove(t, diceValue));
-             _handleMoveToken(null, validToken.id, roomCode: rCode, playerId: pId);
-           });
-        }
+        room.startTimer(() => _handleTimeout(rCode));
       } else {
         String msg = '${player.name} sacó un $diceValue pero no puede mover ninguna ficha.';
         _broadcastGameEvent(rCode, msg);
         if (diceValue == 6) {
            engine.phase = GamePhase.rolling;
            _broadcastGameState(rCode);
+           room.startTimer(() => _handleTimeout(rCode));
         } else {
            _moveToNextTurnWithSkips(rCode);
         }
@@ -303,11 +342,13 @@ void _handleMoveToken(WebSocketChannel? channel, int tokenId, {String? roomCode,
     return;
   }
 
+  room.stopTimer();
   final token = player.tokens.firstWhere((t) => t.id == tokenId, orElse: () => throw 'Token no encontrado');
   final diceValue = engine.lastDiceValue;
 
   if (!engine.canMove(token, diceValue)) {
     if (channel != null) _sendError(channel, 'Esa ficha no se puede mover.');
+    room.startTimer(() => _handleTimeout(rCode));
     return;
   }
 
@@ -346,7 +387,6 @@ void _handleMoveToken(WebSocketChannel? channel, int tokenId, {String? roomCode,
 
     if (actionMsg != null) _broadcastGameEvent(rCode, actionMsg);
 
-    // CRUCIAL: Si el jugador ha terminado, ignorar turnos extra y pasar turno / finalizar juego
     if (player.isFinished) {
       player.extraTurns = 0;
       _moveToNextTurnWithSkips(rCode);
@@ -354,20 +394,46 @@ void _handleMoveToken(WebSocketChannel? channel, int tokenId, {String? roomCode,
       player.extraTurns--;
       engine.phase = GamePhase.rolling;
       _broadcastGameState(rCode);
+      room.startTimer(() => _handleTimeout(rCode));
     } else if (canRepeat) {
       engine.phase = GamePhase.rolling;
       _broadcastGameState(rCode);
+      room.startTimer(() => _handleTimeout(rCode));
     } else {
       _moveToNextTurnWithSkips(rCode);
     }
 
     if (engine.phase == GamePhase.finished) {
-      _broadcastGameEvent(rCode, '¡${player.name} ha terminado!');
+      _broadcastGameEvent(rCode, '¡${player.name} ha ganado!');
       Timer(const Duration(seconds: 10), () => _rooms.remove(rCode));
-    } else if (engine.currentPlayer.isAI && !engine.currentPlayer.isFinished) {
-      _triggerAITurn(rCode);
     }
   });
+}
+
+void _handleTimeout(String roomCode) {
+  final room = _rooms[roomCode];
+  if (room == null) return;
+  final player = room.engine.currentPlayer;
+
+  if (room.engine.phase == GamePhase.rolling) {
+    _handleRollDice(null, roomCode: roomCode, playerId: player.id);
+  } else if (room.engine.phase == GamePhase.choosingToken) {
+    Token? bestToken;
+    int maxPos = -1;
+    for (final t in player.tokens) {
+      if (room.engine.canMove(t, room.engine.lastDiceValue)) {
+        if (t.position > maxPos) {
+          maxPos = t.position;
+          bestToken = t;
+        }
+      }
+    }
+    if (bestToken != null) {
+      _handleMoveToken(null, bestToken.id, roomCode: roomCode, playerId: player.id);
+    } else {
+      _moveToNextTurnWithSkips(roomCode);
+    }
+  }
 }
 
 void _moveToNextTurnWithSkips(String roomCode) {
@@ -379,7 +445,6 @@ void _moveToNextTurnWithSkips(String roomCode) {
   do {
     engine.nextTurn();
     if (engine.phase == GamePhase.finished) break;
-
     if (engine.currentPlayer.mustSkipTurn && !engine.currentPlayer.isFinished) {
       engine.currentPlayer.consumeSkip();
       _broadcastGameEvent(roomCode, '${engine.currentPlayer.name} salta el turno.');
@@ -390,15 +455,9 @@ void _moveToNextTurnWithSkips(String roomCode) {
   } while (skipHappened);
 
   _broadcastGameState(roomCode);
-}
-
-void _triggerAITurn(String roomCode) {
-  Timer(const Duration(seconds: 2), () {
-    final room = _rooms[roomCode];
-    if (room != null && room.engine.phase == GamePhase.rolling) {
-      _handleRollDice(null, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
-    }
-  });
+  if (engine.phase != GamePhase.finished) {
+    room.startTimer(() => _handleTimeout(roomCode));
+  }
 }
 
 // --- Helpers de Comunicación ---
@@ -427,7 +486,7 @@ void _broadcastGameState(String roomCode) {
     'event': 'game_state',
     'data': {
       'roomCode': room.code,
-      'maxPlayers': room.maxPlayers,
+      'timer': room.remainingSeconds,
       'phase': phaseStr,
       'winners': room.engine.finishedPlayers.map((p) => p.id).toList(),
       'players': room.engine.players.asMap().entries.map((entry) {
@@ -457,18 +516,9 @@ void _broadcastInfo(String roomCode, String message) {
   });
 }
 
-void _broadcastInfoToChannel(WebSocketChannel channel, String message) {
+void _sendError(WebSocketChannel channel, String message) {
   channel.sink.add(jsonEncode({
-    'event': 'info',
+    'event': 'error',
     'data': {'message': message},
   }));
-}
-
-void _sendError(WebSocketChannel channel, String message) {
-  channel.sink.add(
-    jsonEncode({
-      'event': 'error',
-      'data': {'message': message},
-    }),
-  );
 }
