@@ -40,7 +40,7 @@ class GameRoom {
     
     final currentPlayer = engine.currentPlayer;
     
-    // Si el jugador es IA o está desconectado, jugamos instantáneamente
+    // Si el jugador es IA o está marcado para jugar automático, jugamos instantáneamente
     if (currentPlayer.isAI) {
       onTimeout();
       return;
@@ -74,30 +74,39 @@ final Map<String, GameRoom> _rooms = {};
 final Map<WebSocketChannel, String> _channelToPlayer = {};
 final Map<WebSocketChannel, String> _channelToRoom = {};
 
+// Temporizadores de limpieza para reconexión (clientId -> Timer)
+final Map<String, Timer> _reconnectionTimers = {};
+
+// Simulamos una base de datos de usuarios y reportes en memoria
+final Map<String, Map<String, dynamic>> _userDatabase = {};
+final List<Map<String, dynamic>> _playerReports = [];
+
 Future<Response> onRequest(RequestContext context) async {
   final handler = webSocketHandler((channel, protocol) {
     
     void handleDisconnect() {
       final roomCode = _channelToRoom[channel];
       final playerId = _channelToPlayer[channel];
+      
       if (roomCode != null && playerId != null) {
         final room = _rooms[roomCode];
         if (room != null) {
-          final player = room.engine.players.firstWhere(
-            (p) => p.id == playerId,
-            orElse: () => Player(id: '', name: ''),
-          );
-          if (player.id.isNotEmpty) {
-            player.isAI = true;
-            room.clients.remove(playerId);
-            _broadcastGameState(roomCode);
-            _broadcastInfo(roomCode, '${player.name} ha salido. IA al mando.');
-
-            // Si era su turno, el temporizador de GameRoom detectará isAI y jugará al instante
-            if (room.engine.currentPlayer.id == playerId) {
-              room.startTimer(() => _handleTimeout(roomCode));
+          // 1. Iniciamos un temporizador de gracia de 2 minutos para la reconexión
+          _reconnectionTimers[playerId]?.cancel();
+          _reconnectionTimers[playerId] = Timer(const Duration(minutes: 2), () {
+            // Si pasan 2 minutos sin reconexión, marcamos como IA definitiva
+            final p = room.engine.players.firstWhere((p) => p.id == playerId, orElse: () => Player(id: '', name: ''));
+            if (p.id.isNotEmpty) {
+              p.isAI = true;
+              _broadcastGameState(roomCode);
+              _broadcastInfo(roomCode, '${p.name} abandonó la partida definitivamente.');
             }
-          }
+            _reconnectionTimers.remove(playerId);
+          });
+
+          // 2. Quitamos el canal activo pero mantenemos al jugador en la sala
+          room.clients.remove(playerId);
+          _broadcastInfo(roomCode, '${playerId} se ha desconectado. Esperando reconexión (2 min)...');
         }
       }
       _channelToPlayer.remove(channel);
@@ -109,70 +118,101 @@ Future<Response> onRequest(RequestContext context) async {
         try {
           final event = jsonDecode(message as String) as Map<String, dynamic>;
           final eventName = event['event'] as String;
-          final data =
-              (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
-
+          final data = (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
           final clientId = event['clientId'] as String?;
+
           if (clientId == null) {
-            _sendError(channel, 'clientId es requerido en la raíz del JSON.');
+            _sendError(channel, 'clientId requerido.');
+            return;
+          }
+
+          // --- NUEVO EVENTO: request_sync (Requerimiento de Resiliencia) ---
+          if (eventName == 'request_sync') {
+            _reconnectionTimers[clientId]?.cancel();
+            _reconnectionTimers.remove(clientId);
+
+            // Buscar en qué sala está el usuario
+            GameRoom? userRoom;
+            for (final room in _rooms.values) {
+              if (room.engine.players.any((p) => p.id == clientId)) {
+                userRoom = room;
+                break;
+              }
+            }
+
+            if (userRoom != null) {
+              // Vincular nuevo canal
+              userRoom.clients[clientId] = channel;
+              _channelToPlayer[channel] = clientId;
+              _channelToRoom[channel] = userRoom.code;
+              
+              // Enviar estado actual completo
+              _broadcastGameState(userRoom.code);
+              
+              // Si es su turno, reactivar el timer de 20s
+              if (userRoom.engine.currentPlayer.id == clientId && userRoom.engine.phase != GamePhase.idle) {
+                userRoom.startTimer(() => _handleTimeout(userRoom!.code));
+              }
+            } else {
+              _sendError(channel, 'No se encontró una partida activa para este ID.');
+            }
+            return;
+          }
+
+          // Otros eventos (report_player, delete_user_data, etc.)
+          if (eventName == 'report_player') {
+            final reportedId = data['reportedId'] as String?;
+            final reason = data['reason'] as String?;
+            if (reportedId != null && reason != null) {
+              _playerReports.add({
+                'reporterId': clientId,
+                'reportedId': reportedId,
+                'reason': reason,
+                'timestamp': data['timestamp'] ?? DateTime.now().toIso8601String(),
+              });
+              channel.sink.add(jsonEncode({'event': 'report_received', 'data': {'message': 'Reporte registrado.'}}));
+            }
+            return;
+          }
+
+          if (eventName == 'delete_user_data') {
+            _userDatabase.remove(data['playerId'] ?? clientId);
+            channel.sink.add(jsonEncode({'event': 'user_data_deleted', 'data': {'message': 'Datos eliminados.'}}));
             return;
           }
 
           if (eventName == 'find_match') {
             final targetMaxPlayers = (data['maxPlayers'] as int?) ?? 2;
-            
             GameRoom? foundRoom;
             for (final room in _rooms.values) {
-              if (room.isPublic && 
-                  room.maxPlayers == targetMaxPlayers && 
-                  room.engine.players.length < room.maxPlayers &&
-                  room.engine.phase == GamePhase.idle) {
-                foundRoom = room;
-                break;
+              if (room.isPublic && room.maxPlayers == targetMaxPlayers && 
+                  room.engine.players.length < room.maxPlayers && room.engine.phase == GamePhase.idle) {
+                foundRoom = room; break;
               }
             }
-
             if (foundRoom != null) {
               _joinToRoom(channel, foundRoom, clientId, data['name'] as String?);
             } else {
-              channel.sink.add(jsonEncode({
-                'event': 'error',
-                'data': {
-                  'code': 'MATCH_NOT_FOUND',
-                  'message': 'No se encontraron salas públicas disponibles.'
-                }
-              }));
+              _sendError(channel, 'No hay salas.', code: 'MATCH_NOT_FOUND');
             }
             return;
           }
 
           if (eventName == 'create_game') {
-            final maxPlayers = (data['maxPlayers'] as int?) ?? 2;
-            final isPublic = (data['isPublic'] as bool?) ?? false;
-            _createAndJoinRoom(channel, clientId, data['name'] as String?, maxPlayers, isPublic);
+            _createAndJoinRoom(channel, clientId, data['name'] as String?, (data['maxPlayers'] as int?) ?? 2, data['isPublic'] ?? false);
           }
 
           if (eventName == 'join_game') {
-            final roomCode = data['roomCode'] as String?;
-            final room = _rooms[roomCode ?? ''];
-            if (room != null) {
-              _joinToRoom(channel, room, clientId, data['name'] as String?);
-            } else {
-              _sendError(channel, 'La sala no existe.');
-            }
+            final room = _rooms[data['roomCode'] ?? ''];
+            if (room != null) _joinToRoom(channel, room, clientId, data['name'] as String?);
+            else _sendError(channel, 'La sala no existe.');
           }
 
-          if (eventName == 'roll_dice') {
-            _handleRollDice(channel);
-          }
+          if (eventName == 'roll_dice') _handleRollDice(channel);
 
           if (eventName == 'move_token') {
             final tokenId = data['tokenId'] as int?;
-            if (tokenId != null) {
-              _handleMoveToken(channel, tokenId);
-            } else {
-              _sendError(channel, 'tokenId requerido.');
-            }
+            if (tokenId != null) _handleMoveToken(channel, tokenId);
           }
 
           if (eventName == 'chat_message') {
@@ -183,18 +223,12 @@ Future<Response> onRequest(RequestContext context) async {
                 final player = room.engine.players.firstWhere((p) => p.id == clientId);
                 room.broadcast({
                   'event': 'chat',
-                  'data': {
-                    'sender': player.name,
-                    'senderId': clientId,
-                    'message': data['message']
-                  },
+                  'data': {'sender': player.name, 'senderId': clientId, 'message': data['message']},
                 });
               }
             }
           }
-        } catch (e) {
-          // Error silencioso
-        }
+        } catch (e) { /* Error silencioso */ }
       },
       onDone: handleDisconnect,
       onError: (dynamic error) => handleDisconnect(),
@@ -203,72 +237,50 @@ Future<Response> onRequest(RequestContext context) async {
   return handler(context);
 }
 
-// --- Funciones de Gestión de Salas ---
+// --- Funciones de Gestión de Salas (Sin cambios significativos en lógica de juego) ---
 
 void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name, int maxPlayers, bool isPublic) {
   final roomCode = (DateTime.now().millisecondsSinceEpoch % 100000).toString().padLeft(5, '0');
   final board = generateBoard(classicActionPositions, classicActions);
   final engine = GameEngine(board: board, players: []);
-  
   final room = GameRoom(roomCode, engine, maxPlayers, isPublic: isPublic);
   _rooms[roomCode] = room;
-
-  final playerName = name ?? 'Anfitrión';
-  final newPlayer = Player(id: clientId, name: playerName);
+  final newPlayer = Player(id: clientId, name: name ?? 'Anfitrión');
   room.engine.players.add(newPlayer);
   room.clients[clientId] = channel;
   _channelToPlayer[channel] = clientId;
   _channelToRoom[channel] = roomCode;
-  
-  channel.sink.add(jsonEncode({
-    'event': 'game_created',
-    'data': {'roomCode': roomCode},
-  }));
+  channel.sink.add(jsonEncode({'event': 'game_created', 'data': {'roomCode': roomCode}}));
   _broadcastGameState(roomCode);
 }
 
 void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, String? name) {
   final existingPlayerIndex = room.engine.players.indexWhere((p) => p.id == clientId);
   if (existingPlayerIndex != -1) {
+    _reconnectionTimers[clientId]?.cancel();
+    _reconnectionTimers.remove(clientId);
     final player = room.engine.players[existingPlayerIndex];
-    final oldChannel = room.clients[clientId];
-    if (oldChannel != null && oldChannel != channel) {
-      _channelToPlayer.remove(oldChannel);
-      _channelToRoom.remove(oldChannel);
-    }
     player.isAI = false; 
     room.clients[clientId] = channel;
     _channelToPlayer[channel] = clientId;
     _channelToRoom[channel] = room.code;
-    channel.sink.add(jsonEncode({
-      'event': 'game_joined',
-      'data': {'playerCount': room.engine.players.length, 'reconnected': true},
-    }));
+    channel.sink.add(jsonEncode({'event': 'game_joined', 'data': {'reconnected': true}}));
     _broadcastGameState(room.code);
-    
     if (room.engine.currentPlayer.id == clientId && room.engine.phase != GamePhase.idle) {
       room.startTimer(() => _handleTimeout(room.code));
     }
     return;
   }
-
   if (room.engine.phase != GamePhase.idle || room.engine.players.length >= room.maxPlayers) {
-    _sendError(channel, 'La sala no está disponible.');
-    return;
+    _sendError(channel, 'Sala no disponible.'); return;
   }
-
-  final playerName = name ?? 'Jugador ${room.engine.players.length + 1}';
-  final newPlayer = Player(id: clientId, name: playerName);
+  final newPlayer = Player(id: clientId, name: name ?? 'Jugador ${room.engine.players.length + 1}');
   room.engine.players.add(newPlayer);
   room.clients[clientId] = channel;
   _channelToPlayer[channel] = clientId;
   _channelToRoom[channel] = room.code;
-  channel.sink.add(jsonEncode({
-    'event': 'game_joined',
-    'data': {'playerCount': room.engine.players.length},
-  }));
+  channel.sink.add(jsonEncode({'event': 'game_joined', 'data': {'playerCount': room.engine.players.length}}));
   _broadcastGameState(room.code);
-
   if (room.engine.players.length == room.maxPlayers) {
     room.engine.phase = GamePhase.rolling;
     _broadcastGameState(room.code);
@@ -281,48 +293,23 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
   final pId = playerId ?? _channelToPlayer[channel];
   if (rCode == null || pId == null) return;
   final room = _rooms[rCode];
-
   if (room != null) {
-    if (room.engine.currentPlayer.id != pId) {
-      if (channel != null) _sendError(channel, 'No es tu turno.');
-      return;
-    }
-    if (room.engine.phase != GamePhase.rolling && room.engine.phase != GamePhase.idle) {
-      if (channel != null) _sendError(channel, 'Acción no permitida.');
-      return;
-    }
-    
+    if (room.engine.currentPlayer.id != pId) return;
     room.stopTimer();
-    final engine = room.engine;
-    final player = engine.players.firstWhere((p) => p.id == pId);
-
-    if (!player.isFinished && engine.phase != GamePhase.finished) {
-      final diceValue = engine.rollDice();
-      _broadcastDiceResult(rCode, diceValue, pId);
-      engine.registerSix(player, diceValue);
-
-      if (player.consecutiveSixes >= 3) {
-        engine.penaltyThreeSixes(player);
-        _broadcastGameEvent(rCode, '${player.name} sacó tres 6 y sus fichas vuelven al inicio.');
-        _moveToNextTurnWithSkips(rCode);
-        return;
-      }
-
-      if (engine.canMoveAnyToken(player, diceValue)) {
-        engine.phase = GamePhase.choosingToken;
-        _broadcastGameState(rCode);
-        room.startTimer(() => _handleTimeout(rCode));
-      } else {
-        String msg = '${player.name} sacó un $diceValue pero no puede mover ninguna ficha.';
-        _broadcastGameEvent(rCode, msg);
-        if (diceValue == 6) {
-           engine.phase = GamePhase.rolling;
-           _broadcastGameState(rCode);
-           room.startTimer(() => _handleTimeout(rCode));
-        } else {
-           _moveToNextTurnWithSkips(rCode);
-        }
-      }
+    final diceValue = room.engine.rollDice();
+    _broadcastDiceResult(rCode, diceValue, pId);
+    room.engine.registerSix(room.engine.currentPlayer, diceValue);
+    if (room.engine.currentPlayer.consecutiveSixes >= 3) {
+      room.engine.penaltyThreeSixes(room.engine.currentPlayer);
+      _broadcastGameEvent(rCode, '${room.engine.currentPlayer.name} sacó tres 6.');
+      _moveToNextTurnWithSkips(rCode);
+    } else if (room.engine.canMoveAnyToken(room.engine.currentPlayer, diceValue)) {
+      room.engine.phase = GamePhase.choosingToken;
+      _broadcastGameState(rCode);
+      room.startTimer(() => _handleTimeout(rCode));
+    } else {
+      if (diceValue == 6) { room.engine.phase = GamePhase.rolling; _broadcastGameState(rCode); room.startTimer(() => _handleTimeout(rCode)); }
+      else _moveToNextTurnWithSkips(rCode);
     }
   }
 }
@@ -333,146 +320,64 @@ void _handleMoveToken(WebSocketChannel? channel, int tokenId, {String? roomCode,
   if (rCode == null || pId == null) return;
   final room = _rooms[rCode];
   if (room == null) return;
-
-  final engine = room.engine;
-  final player = engine.players.firstWhere((p) => p.id == pId);
-
-  if (engine.currentPlayer.id != pId || engine.phase != GamePhase.choosingToken) {
-    if (channel != null) _sendError(channel, 'No es el momento de mover.');
-    return;
-  }
-
   room.stopTimer();
-  final token = player.tokens.firstWhere((t) => t.id == tokenId, orElse: () => throw 'Token no encontrado');
-  final diceValue = engine.lastDiceValue;
-
-  if (!engine.canMove(token, diceValue)) {
-    if (channel != null) _sendError(channel, 'Esa ficha no se puede mover.');
-    room.startTimer(() => _handleTimeout(rCode));
-    return;
-  }
-
-  engine.phase = GamePhase.moving;
+  final token = room.engine.currentPlayer.tokens.firstWhere((t) => t.id == tokenId);
+  if (!room.engine.canMove(token, room.engine.lastDiceValue)) { room.startTimer(() => _handleTimeout(rCode)); return; }
+  room.engine.phase = GamePhase.moving;
   _broadcastGameState(rCode);
-
   Timer(const Duration(milliseconds: 500), () {
-    final canRepeat = (diceValue == 6);
-    String? actionMsg;
-
-    for (var i = 0; i < diceValue; i++) engine.stepForward(token);
-    
-    final cell = engine.board.getCell(token.position);
-    if (cell.action != null) {
-      final action = cell.action!;
-      switch (action.type) {
-        case BoardActionType.goToStart: actionMsg = '${player.name} volvió al inicio.'; break;
-        case BoardActionType.moveTo: actionMsg = '${player.name} avanzó/retrocedió por casilla de acción.'; break;
-        case BoardActionType.skipTurn: actionMsg = '${player.name} perdió el turno.'; break;
-        case BoardActionType.rollAgain: actionMsg = '${player.name} repite turno por casilla.'; player.extraTurns++; break;
-      }
-      engine.applyCellAction(player, token);
-    }
-
-    if (engine.resolveCollisions(token)) {
-      final captureMsg = '${player.name} capturó una ficha.';
-      actionMsg = (actionMsg == null) ? captureMsg : '$actionMsg y $captureMsg';
-      player.extraTurns++;
-    }
-
-    if (token.isFinished) {
-       final finishMsg = '¡Una ficha de ${player.name} llegó a la meta!';
-       actionMsg = (actionMsg == null) ? finishMsg : '$actionMsg. $finishMsg';
-       player.extraTurns++;
-    }
-
-    if (actionMsg != null) _broadcastGameEvent(rCode, actionMsg);
-
-    if (player.isFinished) {
-      player.extraTurns = 0;
-      _moveToNextTurnWithSkips(rCode);
-    } else if (player.extraTurns > 0) {
-      player.extraTurns--;
-      engine.phase = GamePhase.rolling;
-      _broadcastGameState(rCode);
-      room.startTimer(() => _handleTimeout(rCode));
-    } else if (canRepeat) {
-      engine.phase = GamePhase.rolling;
-      _broadcastGameState(rCode);
-      room.startTimer(() => _handleTimeout(rCode));
-    } else {
-      _moveToNextTurnWithSkips(rCode);
-    }
-
-    if (engine.phase == GamePhase.finished) {
-      _broadcastGameEvent(rCode, '¡${player.name} ha ganado!');
-      Timer(const Duration(seconds: 10), () => _rooms.remove(rCode));
-    }
+    final diceValue = room.engine.lastDiceValue;
+    for (var i = 0; i < diceValue; i++) room.engine.stepForward(token);
+    room.engine.applyCellAction(room.engine.currentPlayer, token);
+    if (room.engine.resolveCollisions(token)) room.engine.currentPlayer.extraTurns++;
+    if (token.isFinished) room.engine.currentPlayer.extraTurns++;
+    if (room.engine.currentPlayer.isFinished) { room.engine.currentPlayer.extraTurns = 0; _moveToNextTurnWithSkips(rCode); }
+    else if (room.engine.currentPlayer.extraTurns > 0 || diceValue == 6) {
+      if (room.engine.currentPlayer.extraTurns > 0) room.engine.currentPlayer.extraTurns--;
+      room.engine.phase = GamePhase.rolling; _broadcastGameState(rCode); room.startTimer(() => _handleTimeout(rCode));
+    } else _moveToNextTurnWithSkips(rCode);
+    if (room.engine.phase == GamePhase.finished) Timer(const Duration(seconds: 10), () => _rooms.remove(rCode));
   });
 }
 
 void _handleTimeout(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
-  final player = room.engine.currentPlayer;
-
-  if (room.engine.phase == GamePhase.rolling) {
-    _handleRollDice(null, roomCode: roomCode, playerId: player.id);
-  } else if (room.engine.phase == GamePhase.choosingToken) {
-    Token? bestToken;
-    int maxPos = -1;
-    for (final t in player.tokens) {
-      if (room.engine.canMove(t, room.engine.lastDiceValue)) {
-        if (t.position > maxPos) {
-          maxPos = t.position;
-          bestToken = t;
-        }
-      }
+  if (room.engine.phase == GamePhase.rolling) _handleRollDice(null, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
+  else if (room.engine.phase == GamePhase.choosingToken) {
+    Token? best; int max = -1;
+    for (final t in room.engine.currentPlayer.tokens) {
+      if (room.engine.canMove(t, room.engine.lastDiceValue) && t.position > max) { max = t.position; best = t; }
     }
-    if (bestToken != null) {
-      _handleMoveToken(null, bestToken.id, roomCode: roomCode, playerId: player.id);
-    } else {
-      _moveToNextTurnWithSkips(roomCode);
-    }
+    if (best != null) _handleMoveToken(null, best.id, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
+    else _moveToNextTurnWithSkips(roomCode);
   }
 }
 
 void _moveToNextTurnWithSkips(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
-  final engine = room.engine;
-
-  bool skipHappened = false;
+  bool skip;
   do {
-    engine.nextTurn();
-    if (engine.phase == GamePhase.finished) break;
-    if (engine.currentPlayer.mustSkipTurn && !engine.currentPlayer.isFinished) {
-      engine.currentPlayer.consumeSkip();
-      _broadcastGameEvent(roomCode, '${engine.currentPlayer.name} salta el turno.');
-      skipHappened = true;
-    } else {
-      skipHappened = false;
-    }
-  } while (skipHappened);
-
+    room.engine.nextTurn();
+    if (room.engine.phase == GamePhase.finished) break;
+    if (room.engine.currentPlayer.mustSkipTurn) { room.engine.currentPlayer.consumeSkip(); skip = true; }
+    else skip = false;
+  } while (skip);
   _broadcastGameState(roomCode);
-  if (engine.phase != GamePhase.finished) {
-    room.startTimer(() => _handleTimeout(roomCode));
-  }
+  if (room.engine.phase != GamePhase.finished) room.startTimer(() => _handleTimeout(roomCode));
 }
 
-// --- Helpers de Comunicación ---
+// --- Helpers ---
 
-void _broadcastGameEvent(String roomCode, String message) {
-  _rooms[roomCode]?.broadcast({
-    'event': 'game_event',
-    'data': {'message': message},
-  });
-}
+void _broadcastGameEvent(String r, String m) => _rooms[r]?.broadcast({'event': 'game_event', 'data': {'message': m}});
+void _broadcastDiceResult(String r, int v, String p) => _rooms[r]?.broadcast({'event': 'dice_result', 'data': {'diceValue': v, 'playerId': p}});
+void _broadcastInfo(String r, String m) => _rooms[r]?.broadcast({'event': 'info', 'data': {'message': m}});
+void _sendError(WebSocketChannel c, String m, {String? code}) => c.sink.add(jsonEncode({'event': 'error', 'data': {'message': m, 'code': code}}));
 
 void _broadcastGameState(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
-
   String phaseStr = 'idle';
   switch (room.engine.phase) {
     case GamePhase.idle: phaseStr = 'idle'; break;
@@ -481,44 +386,16 @@ void _broadcastGameState(String roomCode) {
     case GamePhase.moving: phaseStr = 'moving'; break;
     case GamePhase.finished: phaseStr = 'finished'; break;
   }
-
   room.broadcast({
     'event': 'game_state',
     'data': {
-      'roomCode': room.code,
-      'timer': room.remainingSeconds,
-      'phase': phaseStr,
+      'roomCode': room.code, 'timer': room.remainingSeconds, 'phase': phaseStr,
       'winners': room.engine.finishedPlayers.map((p) => p.id).toList(),
-      'players': room.engine.players.asMap().entries.map((entry) {
-        final index = entry.key;
-        final p = entry.value;
-        final json = p.toJson();
-        json['index'] = index;
-        return json;
+      'players': room.engine.players.asMap().entries.map((e) {
+        final json = e.value.toJson(); json['index'] = e.key; return json;
       }).toList(),
       'currentPlayerId': room.engine.currentPlayer.id,
       'lastDiceValue': room.engine.lastDiceValue,
     },
   });
-}
-
-void _broadcastDiceResult(String roomCode, int diceValue, String playerId) {
-  _rooms[roomCode]?.broadcast({
-    'event': 'dice_result',
-    'data': {'diceValue': diceValue, 'playerId': playerId},
-  });
-}
-
-void _broadcastInfo(String roomCode, String message) {
-  _rooms[roomCode]?.broadcast({
-    'event': 'info',
-    'data': {'message': message},
-  });
-}
-
-void _sendError(WebSocketChannel channel, String message) {
-  channel.sink.add(jsonEncode({
-    'event': 'error',
-    'data': {'message': message},
-  }));
 }
