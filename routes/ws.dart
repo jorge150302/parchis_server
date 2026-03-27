@@ -220,7 +220,28 @@ Future<Response> onRequest(RequestContext context) async {
                 });
               }
             }
+            return;
           }
+
+          // --- NUEVO EVENTO: quick_chat ---
+          if (eventName == 'quick_chat') {
+            final roomCode = _channelToRoom[channel];
+            if (roomCode != null) {
+              final room = _rooms[roomCode];
+              if (room != null) {
+                // Retransmitimos a toda la sala
+                room.broadcast({
+                  'event': 'quick_chat',
+                  'data': {
+                    'senderId': clientId,
+                    'message': data['message'] ?? '',
+                  },
+                });
+              }
+            }
+            return;
+          }
+
         } catch (e) { /* Error silencioso */ }
       },
       onDone: handleDisconnect,
@@ -307,7 +328,6 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
     room.stopTimer();
     
     final diceValue = room.engine.rollDice();
-    // Persistimos el valor en el jugador actual para que vaya en el game_state
     room.engine.currentPlayer.lastDiceValue = diceValue;
     
     _broadcastDiceResult(rCode, diceValue, pId);
@@ -416,7 +436,7 @@ void _broadcastGameState(String roomCode) {
         final json = e.value.toJson(); json['index'] = e.key; return json;
       }).toList(),
       'currentPlayerId': room.engine.currentPlayer.id,
-      'lastDiceValue': room.engine.lastDiceValue, // En la raíz (usando el motor)
+      'lastDiceValue': room.engine.lastDiceValue,
     },
   });
 }
