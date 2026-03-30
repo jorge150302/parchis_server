@@ -32,7 +32,7 @@ class Player {
   int consecutiveSixes;
   int extraTurns;
   bool isAI;
-  int lastDiceValue; // NUEVO: Para persistir el último dado de este jugador
+  int lastDiceValue;
 
   Player({
     required this.id,
@@ -45,9 +45,13 @@ class Player {
     this.lastDiceValue = 0,
   }) : tokens = List.generate(numTokens, (i) => Token(id: i));
 
+  /// Reinicia el estado del jugador.
+  /// PROTECCIÓN: Las fichas que ya terminaron (isFinished) NO se tocan.
   void resetToStart() {
     for (final token in tokens) {
-      token.reset();
+      if (!token.isFinished) {
+        token.reset();
+      }
     }
     skippedTurns = 0;
     consecutiveSixes = 0;
@@ -76,6 +80,6 @@ class Player {
         'skippedTurns': skippedTurns,
         'extraTurns': extraTurns,
         'consecutiveSixes': consecutiveSixes,
-        'lastDiceValue': lastDiceValue, // Incluido en el JSON del jugador
+        'lastDiceValue': lastDiceValue,
       };
 }

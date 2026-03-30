@@ -70,15 +70,15 @@ class GameEngine {
   }
 
   /// Verifica si una casilla tiene un puente.
-  /// En la zona común bloquea a todos. En la zona privada (> 68) solo al dueño.
+  /// REQUISITO: Se ignoran las fichas que ya han terminado (isFinished: true).
   bool isBridge(int position, Player movingPlayer) {
     if (position <= 0 || position >= board.finalPosition) return false;
     
     for (final player in players) {
+      // Solo contamos las fichas que NO han terminado
       final tokensAtPos = player.tokens.where((t) => !t.isFinished && t.position == position).length;
       if (tokensAtPos >= 2) {
-        // REGLA: Pasillo de Meta (Zona Privada). 
-        // Si la posición es mayor a 68, solo bloquea si el puente es del propio jugador.
+        // En pasillo de meta (> 68), solo bloquea si el puente es del propio jugador.
         if (position > 68) {
           if (player.id == movingPlayer.id) return true;
         } else {
@@ -93,16 +93,12 @@ class GameEngine {
   bool canMove(Token token, int steps) {
     if (token.isFinished) return false;
     
-    // REGLA: Si la ficha está en casa (0), solo puede salir si el dado es un 5.
-    // DESACTIVADO TEMPORALMENTE: Para pruebas del tablero corto.
-    // if (token.position == 0 && steps != 5) return false;
-
     final targetPos = token.position + steps;
     
-    // REGLA: Tiro exacto para entrar a la meta.
+    // Tiro exacto para entrar a la meta.
     if (targetPos > board.finalPosition) return false;
 
-    // REGLA: Puentes (Bloqueos). No se puede saltar ni caer en un puente.
+    // Puentes (Bloqueos). No se puede saltar ni caer en un puente.
     for (int i = 1; i <= steps; i++) {
       int checkPos = token.position + i;
       if (isBridge(checkPos, currentPlayer)) return false;
@@ -115,7 +111,6 @@ class GameEngine {
     return player.tokens.any((token) => canMove(token, steps));
   }
 
-  /// Mueve un paso y asegura que el estado isFinished se marque correctamente.
   bool stepForward(Token token) {
     if (token.position < board.finalPosition) {
       token.position++;
@@ -166,15 +161,19 @@ class GameEngine {
     return sentHome;
   }
 
+  /// Comprueba colisiones tras un movimiento.
+  /// REQUISITO: Se ignoran las fichas capturadas o atacantes que tengan isFinished: true.
   bool resolveCollisions(Token token) {
+    // Una ficha que ya terminó no puede capturar a nadie.
     if (token.isFinished) return false;
 
     bool sentHome = false;
     for (final otherPlayer in players) {
-      // REGLA: No hay "Fuego Amigo". No capturamos fichas propias.
+      // No capturamos fichas propias.
       if (otherPlayer.id == currentPlayer.id) continue;
 
       for (final otherToken in otherPlayer.tokens) {
+        // REQUISITO: Ignorar fichas que ya terminaron.
         if (otherToken.isFinished) continue;
         if (otherToken.position == 0) continue;
 
