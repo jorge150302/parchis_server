@@ -95,8 +95,8 @@ class GameEngine {
     
     final targetPos = token.position + steps;
     
-    // Tiro exacto para entrar a la meta.
-    if (targetPos > board.finalPosition) return false;
+    // REQUISITO: El movimiento no debe exceder 100 ni la meta del tablero.
+    if (targetPos > board.finalPosition || targetPos > 100) return false;
 
     // Puentes (Bloqueos). No se puede saltar ni caer en un puente.
     for (int i = 1; i <= steps; i++) {
