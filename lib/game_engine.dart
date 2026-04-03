@@ -38,6 +38,8 @@ class GameEngine {
 
   void nextTurn() {
     final remainingPlayers = players.where((p) => !p.isFinished).length;
+    
+    // Si solo queda un jugador con fichas activas, la partida termina.
     if (remainingPlayers <= 1) {
       phase = GamePhase.finished;
       for (final p in players) {
@@ -70,19 +72,15 @@ class GameEngine {
   }
 
   /// Verifica si una casilla tiene un puente.
-  /// REQUISITO: Se ignoran las fichas que ya han terminado (isFinished: true).
   bool isBridge(int position, Player movingPlayer) {
     if (position <= 0 || position >= board.finalPosition) return false;
     
     for (final player in players) {
-      // Solo contamos las fichas que NO han terminado
       final tokensAtPos = player.tokens.where((t) => !t.isFinished && t.position == position).length;
       if (tokensAtPos >= 2) {
-        // En pasillo de meta (> 68), solo bloquea si el puente es del propio jugador.
         if (position > 68) {
           if (player.id == movingPlayer.id) return true;
         } else {
-          // Zona común: cualquier puente bloquea a cualquiera.
           return true;
         }
       }
@@ -95,8 +93,8 @@ class GameEngine {
     
     final targetPos = token.position + steps;
     
-    // REQUISITO: El movimiento no debe exceder 100 ni la meta del tablero.
-    if (targetPos > board.finalPosition || targetPos > 100) return false;
+    // Tiro exacto para entrar a la meta.
+    if (targetPos > board.finalPosition) return false;
 
     // Puentes (Bloqueos). No se puede saltar ni caer en un puente.
     for (int i = 1; i <= steps; i++) {
@@ -115,7 +113,10 @@ class GameEngine {
     if (token.position < board.finalPosition) {
       token.position++;
       if (token.position == board.finalPosition) {
+        // Marcamos como finalizada y la sacamos de la vista del tablero
         token.isFinished = true;
+        token.position = -1; 
+        
         if (currentPlayer.isFinished) {
           if (!finishedPlayers.contains(currentPlayer)) {
             finishedPlayers.add(currentPlayer);
@@ -142,8 +143,8 @@ class GameEngine {
           if (action.targetNumber != null) {
             token.position = action.targetNumber!;
             if (token.position >= board.finalPosition) {
-              token.position = board.finalPosition;
               token.isFinished = true;
+              token.position = -1; // Sacar de la vista
               if (player.isFinished && !finishedPlayers.contains(player)) {
                 finishedPlayers.add(player);
               }
@@ -161,21 +162,16 @@ class GameEngine {
     return sentHome;
   }
 
-  /// Comprueba colisiones tras un movimiento.
-  /// REQUISITO: Se ignoran las fichas capturadas o atacantes que tengan isFinished: true.
   bool resolveCollisions(Token token) {
-    // Una ficha que ya terminó no puede capturar a nadie.
     if (token.isFinished) return false;
 
     bool sentHome = false;
     for (final otherPlayer in players) {
-      // No capturamos fichas propias.
       if (otherPlayer.id == currentPlayer.id) continue;
 
       for (final otherToken in otherPlayer.tokens) {
-        // REQUISITO: Ignorar fichas que ya terminaron.
         if (otherToken.isFinished) continue;
-        if (otherToken.position == 0) continue;
+        if (otherToken.position <= 0) continue;
 
         if (otherToken.position == token.position) {
           otherToken.reset();

@@ -192,7 +192,7 @@ Future<Response> onRequest(RequestContext context) async {
           }
 
           if (eventName == 'create_game') {
-            _createAndJoinRoom(channel, clientId, data['name'] as String?, (data['maxPlayers'] as int?) ?? 2, data['isPublic'] ?? false);
+            _createAndJoinRoom(channel, clientId, data['name'] as String?, (data['maxPlayers'] as int?) ?? 2, (data['isPublic'] as bool?) ?? false);
           }
 
           if (eventName == 'join_game') {
@@ -206,6 +206,11 @@ Future<Response> onRequest(RequestContext context) async {
           if (eventName == 'move_token') {
             final tokenId = data['tokenId'] as int?;
             if (tokenId != null) _handleMoveToken(channel, tokenId);
+          }
+
+          if (eventName == 'skip_turn') {
+            final roomCode = _channelToRoom[channel];
+            if (roomCode != null) _moveToNextTurnWithSkips(roomCode);
           }
 
           if (eventName == 'chat_message') {
@@ -250,7 +255,7 @@ Future<Response> onRequest(RequestContext context) async {
   });
   return handler(context);
 }
-//version final buena
+
 // --- Funciones de Gestión de Salas ---
 
 void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name, int maxPlayers, bool isPublic) {
@@ -319,8 +324,8 @@ void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, Strin
 }
 
 void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playerId}) {
-  final rCode = roomCode ?? _channelToRoom[channel];
-  final pId = playerId ?? _channelToPlayer[channel];
+  final rCode = roomCode ?? (channel != null ? _channelToRoom[channel] : null);
+  final pId = playerId ?? (channel != null ? _channelToPlayer[channel] : null);
   if (rCode == null || pId == null) return;
   final room = _rooms[rCode];
   if (room != null) {
@@ -354,8 +359,8 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
 }
 
 void _handleMoveToken(WebSocketChannel? channel, int tokenId, {String? roomCode, String? playerId}) {
-  final rCode = roomCode ?? _channelToRoom[channel];
-  final pId = playerId ?? _channelToPlayer[channel];
+  final rCode = roomCode ?? (channel != null ? _channelToRoom[channel] : null);
+  final pId = playerId ?? (channel != null ? _channelToPlayer[channel] : null);
   if (rCode == null || pId == null) return;
   final room = _rooms[rCode];
   if (room == null) return;
@@ -396,6 +401,7 @@ void _handleTimeout(String roomCode) {
 void _moveToNextTurnWithSkips(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
+  room.stopTimer();
   bool skip;
   do {
     room.engine.nextTurn();
