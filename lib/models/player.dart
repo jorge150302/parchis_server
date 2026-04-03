@@ -1,4 +1,4 @@
-// Contenido para parchis_server/lib/models/player.dart
+// Contenido actualizado para parchis_server/lib/models/player.dart
 
 class Token {
   final int id;
@@ -32,6 +32,7 @@ class Player {
   int consecutiveSixes;
   int extraTurns;
   bool isAI;
+  bool isAutoPlaying; // NUEVO: Estado AFK persistente
   int lastDiceValue;
 
   Player({
@@ -42,11 +43,10 @@ class Player {
     this.consecutiveSixes = 0,
     this.extraTurns = 0,
     this.isAI = false,
+    this.isAutoPlaying = false,
     this.lastDiceValue = 0,
   }) : tokens = List.generate(numTokens, (i) => Token(id: i));
 
-  /// Reinicia el estado del jugador.
-  /// PROTECCIÓN: Las fichas que ya terminaron (isFinished) NO se tocan.
   void resetToStart() {
     for (final token in tokens) {
       if (!token.isFinished) {
@@ -77,6 +77,7 @@ class Player {
         'tokens': tokens.map((t) => t.toJson()).toList(),
         'isFinished': isFinished,
         'isAI': isAI,
+        'isAutoPlaying': isAutoPlaying,
         'skippedTurns': skippedTurns,
         'extraTurns': extraTurns,
         'consecutiveSixes': consecutiveSixes,
