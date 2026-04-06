@@ -129,6 +129,10 @@ class GameEngine {
   }
 
   bool applyCellAction(Player player, Token token) {
+    // CORRECCIÓN: Si el token ya terminó (isFinished), no aplicamos acciones de casilla.
+    // Esto evita el RangeError al intentar acceder a la casilla -1.
+    if (token.isFinished || token.position <= 0) return false;
+
     final cell = board.getCell(token.position);
     final action = cell.action;
     bool sentHome = false;

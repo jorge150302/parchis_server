@@ -260,6 +260,7 @@ Future<Response> onRequest(RequestContext context) async {
 
 void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name, int maxPlayers, bool isPublic) {
   final roomCode = (DateTime.now().millisecondsSinceEpoch % 100000).toString().padLeft(5, '0');
+  // Se genera con totalCells: 10 por el cambio realizado en board_generator.dart
   final board = generateBoard(classicActionPositions, classicActions);
   final engine = GameEngine(board: board, players: []);
   final room = GameRoom(roomCode, engine, maxPlayers, isPublic: isPublic);
@@ -276,6 +277,7 @@ void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name,
 
   channel.sink.add(jsonEncode({'event': 'game_created', 'data': {'roomCode': roomCode}}));
   _broadcastGameState(roomCode);
+  _broadcastInfo(roomCode, '¡ATENCIÓN! El servidor está en MODO PRUEBA con un tablero de 10 casillas. Por favor, asegúrate de que tu frontend use board_size: 10 para que los movimientos coincidan. ¿Confirmas que lo tienes configurado así?');
 
   if (room.engine.phase == GamePhase.rolling) {
     room.startTimer(() => _handleTimeout(roomCode));
@@ -317,6 +319,7 @@ void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, Strin
 
   channel.sink.add(jsonEncode({'event': 'game_joined', 'data': {'playerCount': room.engine.players.length}}));
   _broadcastGameState(room.code);
+  _broadcastInfo(room.code, '¡ATENCIÓN! El servidor está en MODO PRUEBA con un tablero de 10 casillas. Por favor, asegúrate de que tu frontend use board_size: 10 para que los movimientos coincidan. ¿Confirmas que lo tienes configurado así?');
 
   if (gameJustStarted) {
     room.startTimer(() => _handleTimeout(room.code));
@@ -437,6 +440,7 @@ void _broadcastGameState(String roomCode) {
       'roomCode': room.code, 
       'timer': room.remainingSeconds, 
       'phase': phaseStr,
+      'boardSize': room.engine.board.finalPosition,
       'winners': room.engine.finishedPlayers.map((p) => p.id).toList(),
       'players': room.engine.players.asMap().entries.map((e) {
         final json = e.value.toJson(); json['index'] = e.key; return json;
