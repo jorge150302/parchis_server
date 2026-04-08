@@ -40,9 +40,9 @@ class GameRoom {
     
     final currentPlayer = engine.currentPlayer;
     
-    // Si el jugador es IA o está marcado para jugar automático, jugamos instantáneamente
-    if (currentPlayer.isAI) {
-      onTimeout();
+    // REQUERIMIENTO AFK: Si el jugador es IA o está en modo Auto-Play, ejecutamos tras un breve delay (1s)
+    if (currentPlayer.isAI || currentPlayer.isAutoPlaying) {
+      turnTimer = Timer(const Duration(milliseconds: 1000), onTimeout);
       return;
     }
 
@@ -218,23 +218,23 @@ Future<Response> onRequest(RequestContext context) async {
             if (roomCode != null) {
               final room = _rooms[roomCode];
               if (room != null) {
-                final player = room.engine.players.firstWhere((p) => p.id == clientId);
-                room.broadcast({
-                  'event': 'chat',
-                  'data': {'sender': player.name, 'senderId': clientId, 'message': data['message']},
-                });
+                final player = room.engine.players.firstWhere((p) => p.id == clientId, orElse: () => Player(id: '', name: ''));
+                if (player.id.isNotEmpty) {
+                  room.broadcast({
+                    'event': 'chat',
+                    'data': {'sender': player.name, 'senderId': clientId, 'message': data['message']},
+                  });
+                }
               }
             }
             return;
           }
 
-          // --- NUEVO EVENTO: quick_chat ---
           if (eventName == 'quick_chat') {
             final roomCode = _channelToRoom[channel];
             if (roomCode != null) {
               final room = _rooms[roomCode];
               if (room != null) {
-                // Retransmitimos a toda la sala
                 room.broadcast({
                   'event': 'quick_chat',
                   'data': {
@@ -242,6 +242,28 @@ Future<Response> onRequest(RequestContext context) async {
                     'message': data['message'] ?? '',
                   },
                 });
+              }
+            }
+            return;
+          }
+
+          // --- REQUERIMIENTO AFK: toggle_auto_play ---
+          if (eventName == 'toggle_auto_play') {
+            final value = data['value'] as bool? ?? false;
+            final roomCode = _channelToRoom[channel];
+            if (roomCode != null) {
+              final room = _rooms[roomCode];
+              if (room != null) {
+                final player = room.engine.players.firstWhere((p) => p.id == clientId, orElse: () => Player(id: '', name: ''));
+                if (player.id.isNotEmpty) {
+                  player.isAutoPlaying = value;
+                  _broadcastGameState(roomCode);
+                  
+                  // Si es su turno, refrescamos el timer (se activará instantáneamente si es true)
+                  if (room.engine.currentPlayer.id == clientId && room.engine.phase != GamePhase.idle) {
+                    room.startTimer(() => _handleTimeout(roomCode));
+                  }
+                }
               }
             }
             return;
@@ -260,7 +282,6 @@ Future<Response> onRequest(RequestContext context) async {
 
 void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name, int maxPlayers, bool isPublic) {
   final roomCode = (DateTime.now().millisecondsSinceEpoch % 100000).toString().padLeft(5, '0');
-  // Se genera con totalCells: 10 por el cambio realizado en board_generator.dart
   final board = generateBoard(classicActionPositions, classicActions);
   final engine = GameEngine(board: board, players: []);
   final room = GameRoom(roomCode, engine, maxPlayers, isPublic: isPublic);
@@ -277,7 +298,7 @@ void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name,
 
   channel.sink.add(jsonEncode({'event': 'game_created', 'data': {'roomCode': roomCode}}));
   _broadcastGameState(roomCode);
-  _broadcastInfo(roomCode, '¡ATENCIÓN! El servidor está en MODO PRUEBA con un tablero de 10 casillas. Por favor, asegúrate de que tu frontend use board_size: 10 para que los movimientos coincidan. ¿Confirmas que lo tienes configurado así?');
+  _broadcastInfo(roomCode, '¡ATENCIÓN! El servidor está en MODO PRUEBA con un tablero de 10 casillas.');
 
   if (room.engine.phase == GamePhase.rolling) {
     room.startTimer(() => _handleTimeout(roomCode));
@@ -319,7 +340,6 @@ void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, Strin
 
   channel.sink.add(jsonEncode({'event': 'game_joined', 'data': {'playerCount': room.engine.players.length}}));
   _broadcastGameState(room.code);
-  _broadcastInfo(room.code, '¡ATENCIÓN! El servidor está en MODO PRUEBA con un tablero de 10 casillas. Por favor, asegúrate de que tu frontend use board_size: 10 para que los movimientos coincidan. ¿Confirmas que lo tienes configurado así?');
 
   if (gameJustStarted) {
     room.startTimer(() => _handleTimeout(room.code));
@@ -390,6 +410,15 @@ void _handleMoveToken(WebSocketChannel? channel, int tokenId, {String? roomCode,
 void _handleTimeout(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
+
+  // REQUERIMIENTO AFK: Si el timer llega a 0 sin acción (no es IA y no estaba en autoplay), activamos autoplay
+  final currentPlayer = room.engine.currentPlayer;
+  if (!currentPlayer.isAI && !currentPlayer.isAutoPlaying) {
+    currentPlayer.isAutoPlaying = true;
+    _broadcastInfo(roomCode, '${currentPlayer.name} ha entrado en modo automático por inactividad.');
+    _broadcastGameState(roomCode);
+  }
+
   if (room.engine.phase == GamePhase.rolling) _handleRollDice(null, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
   else if (room.engine.phase == GamePhase.choosingToken) {
     Token? best; int max = -1;
