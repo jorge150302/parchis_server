@@ -40,9 +40,10 @@ class GameRoom {
     
     final currentPlayer = engine.currentPlayer;
     
-    // REQUERIMIENTO AFK: Si el jugador es IA o está en modo Auto-Play, ejecutamos tras un breve delay (1s)
+    // REQUERIMIENTO AFK: Si el jugador es IA o está en modo Auto-Play, el servidor ejecuta la acción
+    // tras un retardo de cortesía (6s) para que el resto de jugadores vean qué sucede.
     if (currentPlayer.isAI || currentPlayer.isAutoPlaying) {
-      turnTimer = Timer(const Duration(milliseconds: 1000), onTimeout);
+      turnTimer = Timer(const Duration(milliseconds: 6000), onTimeout);
       return;
     }
 
@@ -257,9 +258,11 @@ Future<Response> onRequest(RequestContext context) async {
                 final player = room.engine.players.firstWhere((p) => p.id == clientId, orElse: () => Player(id: '', name: ''));
                 if (player.id.isNotEmpty) {
                   player.isAutoPlaying = value;
+                  
+                  // REQUERIMIENTO: Asegurar que se refleje para todos inmediatamente
                   _broadcastGameState(roomCode);
                   
-                  // Si es su turno, refrescamos el timer (se activará instantáneamente si es true)
+                  // Si es su turno y acaba de activar/desactivar el modo, reiniciamos el timer
                   if (room.engine.currentPlayer.id == clientId && room.engine.phase != GamePhase.idle) {
                     room.startTimer(() => _handleTimeout(roomCode));
                   }
