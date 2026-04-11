@@ -92,6 +92,15 @@ Future<Response> onRequest(RequestContext context) async {
       if (roomCode != null && playerId != null) {
         final room = _rooms[roomCode];
         if (room != null) {
+          // Buscamos al jugador para actualizar su estado de conexión
+          final player = room.engine.players.firstWhere((p) => p.id == playerId, orElse: () => Player(id: '', name: ''));
+          if (player.id.isNotEmpty) {
+            // REQUERIMIENTO: Marcar como desconectado y activar Auto-Play
+            player.isConnected = false;
+            player.isAutoPlaying = true;
+            _broadcastGameState(roomCode);
+          }
+
           // 1. Iniciamos un temporizador de gracia de 2 minutos para la reconexión
           _reconnectionTimers[playerId]?.cancel();
           _reconnectionTimers[playerId] = Timer(const Duration(minutes: 2), () {
@@ -122,6 +131,12 @@ Future<Response> onRequest(RequestContext context) async {
           final data = (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
           final clientId = event['clientId'] as String?;
 
+          // REQUERIMIENTO: Soporte para Ping/Pong
+          if (eventName == 'ping') {
+            channel.sink.add(jsonEncode({'event': 'pong'}));
+            return;
+          }
+
           if (clientId == null) {
             _sendError(channel, 'clientId requerido.');
             return;
@@ -141,6 +156,9 @@ Future<Response> onRequest(RequestContext context) async {
             }
 
             if (userRoom != null) {
+              final player = userRoom.engine.players.firstWhere((p) => p.id == clientId);
+              player.isConnected = true; // REQUERIMIENTO: Restaurar conexión
+
               userRoom.clients[clientId] = channel;
               _channelToPlayer[channel] = clientId;
               _channelToRoom[channel] = userRoom.code;
@@ -315,6 +333,7 @@ void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, Strin
     _reconnectionTimers.remove(clientId);
     final player = room.engine.players[existingPlayerIndex];
     player.isAI = false; 
+    player.isConnected = true; // REQUERIMIENTO: Restaurar conexión
     room.clients[clientId] = channel;
     _channelToPlayer[channel] = clientId;
     _channelToRoom[channel] = room.code;

@@ -33,6 +33,7 @@ class Player {
   int extraTurns;
   bool isAI;
   bool isAutoPlaying; // NUEVO: Estado AFK persistente
+  bool isConnected; // NUEVO: Estado de conexión
   int lastDiceValue;
 
   Player({
@@ -44,6 +45,7 @@ class Player {
     this.extraTurns = 0,
     this.isAI = false,
     this.isAutoPlaying = false,
+    this.isConnected = true,
     this.lastDiceValue = 0,
   }) : tokens = List.generate(numTokens, (i) => Token(id: i));
 
@@ -78,6 +80,7 @@ class Player {
         'isFinished': isFinished,
         'isAI': isAI,
         'isAutoPlaying': isAutoPlaying,
+        'isConnected': isConnected,
         'skippedTurns': skippedTurns,
         'extraTurns': extraTurns,
         'consecutiveSixes': consecutiveSixes,
