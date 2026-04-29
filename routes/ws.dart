@@ -130,6 +130,7 @@ Future<Response> onRequest(RequestContext context) async {
           final eventName = event['event'] as String;
           final data = (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
           final clientId = event['clientId'] as String?;
+          final level = event['level'] as int? ?? 1; // REQUERIMIENTO: Extraer nivel del payload
 
           // REQUERIMIENTO: Soporte para Ping/Pong
           if (eventName == 'ping') {
@@ -157,7 +158,8 @@ Future<Response> onRequest(RequestContext context) async {
 
             if (userRoom != null) {
               final player = userRoom.engine.players.firstWhere((p) => p.id == clientId);
-              player.isConnected = true; // REQUERIMIENTO: Restaurar conexión
+              player.isConnected = true;
+              player.level = level; // REQUERIMIENTO: Actualizar nivel al sincronizar
 
               userRoom.clients[clientId] = channel;
               _channelToPlayer[channel] = clientId;
@@ -203,7 +205,7 @@ Future<Response> onRequest(RequestContext context) async {
               }
             }
             if (foundRoom != null) {
-              _joinToRoom(channel, foundRoom, clientId, data['name'] as String?);
+              _joinToRoom(channel, foundRoom, clientId, data['name'] as String?, level);
             } else {
               _sendError(channel, 'No hay salas.', code: 'MATCH_NOT_FOUND');
             }
@@ -211,23 +213,28 @@ Future<Response> onRequest(RequestContext context) async {
           }
 
           if (eventName == 'create_game') {
-            _createAndJoinRoom(channel, clientId, data['name'] as String?, (data['maxPlayers'] as int?) ?? 2, (data['isPublic'] as bool?) ?? false);
+            _createAndJoinRoom(channel, clientId, data['name'] as String?, (data['maxPlayers'] as int?) ?? 2, (data['isPublic'] as bool?) ?? false, level);
           }
 
           if (eventName == 'join_game') {
             final room = _rooms[data['roomCode'] ?? ''];
-            if (room != null) _joinToRoom(channel, room, clientId, data['name'] as String?);
+            if (room != null) _joinToRoom(channel, room, clientId, data['name'] as String?, level);
             else _sendError(channel, 'La sala no existe.');
           }
 
-          if (eventName == 'roll_dice') _handleRollDice(channel);
+          if (eventName == 'roll_dice') {
+            _updatePlayerLevel(clientId, level);
+            _handleRollDice(channel);
+          }
 
           if (eventName == 'move_token') {
+            _updatePlayerLevel(clientId, level);
             final tokenId = data['tokenId'] as int?;
             if (tokenId != null) _handleMoveToken(channel, tokenId);
           }
 
           if (eventName == 'skip_turn') {
+            _updatePlayerLevel(clientId, level);
             final roomCode = _channelToRoom[channel];
             if (roomCode != null) _moveToNextTurnWithSkips(roomCode);
           }
@@ -276,11 +283,7 @@ Future<Response> onRequest(RequestContext context) async {
                 final player = room.engine.players.firstWhere((p) => p.id == clientId, orElse: () => Player(id: '', name: ''));
                 if (player.id.isNotEmpty) {
                   player.isAutoPlaying = value;
-                  
-                  // REQUERIMIENTO: Asegurar que se refleje para todos inmediatamente
                   _broadcastGameState(roomCode);
-                  
-                  // Si es su turno y acaba de activar/desactivar el modo, reiniciamos el timer
                   if (room.engine.currentPlayer.id == clientId && room.engine.phase != GamePhase.idle) {
                     room.startTimer(() => _handleTimeout(roomCode));
                   }
@@ -299,15 +302,27 @@ Future<Response> onRequest(RequestContext context) async {
   return handler(context);
 }
 
+// --- Helpers de Nivel ---
+
+void _updatePlayerLevel(String clientId, int level) {
+  for (final room in _rooms.values) {
+    final player = room.engine.players.firstWhere((p) => p.id == clientId, orElse: () => Player(id: '', name: ''));
+    if (player.id.isNotEmpty) {
+      player.level = level;
+      break;
+    }
+  }
+}
+
 // --- Funciones de Gestión de Salas ---
 
-void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name, int maxPlayers, bool isPublic) {
+void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name, int maxPlayers, bool isPublic, int level) {
   final roomCode = (DateTime.now().millisecondsSinceEpoch % 100000).toString().padLeft(5, '0');
   final board = generateBoard(classicActionPositions, classicActions);
   final engine = GameEngine(board: board, players: []);
   final room = GameRoom(roomCode, engine, maxPlayers, isPublic: isPublic);
   _rooms[roomCode] = room;
-  final newPlayer = Player(id: clientId, name: name ?? 'Anfitrión');
+  final newPlayer = Player(id: clientId, name: name ?? 'Anfitrión', level: level);
   room.engine.players.add(newPlayer);
   room.clients[clientId] = channel;
   _channelToPlayer[channel] = clientId;
@@ -326,14 +341,15 @@ void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name,
   }
 }
 
-void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, String? name) {
+void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, String? name, int level) {
   final existingPlayerIndex = room.engine.players.indexWhere((p) => p.id == clientId);
   if (existingPlayerIndex != -1) {
     _reconnectionTimers[clientId]?.cancel();
     _reconnectionTimers.remove(clientId);
     final player = room.engine.players[existingPlayerIndex];
     player.isAI = false; 
-    player.isConnected = true; // REQUERIMIENTO: Restaurar conexión
+    player.isConnected = true;
+    player.level = level; // REQUERIMIENTO: Actualizar nivel al reconectar
     room.clients[clientId] = channel;
     _channelToPlayer[channel] = clientId;
     _channelToRoom[channel] = room.code;
@@ -348,7 +364,7 @@ void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, Strin
     _sendError(channel, 'Sala no disponible.'); return;
   }
 
-  final newPlayer = Player(id: clientId, name: name ?? 'Jugador ${room.engine.players.length + 1}');
+  final newPlayer = Player(id: clientId, name: name ?? 'Jugador ${room.engine.players.length + 1}', level: level);
   room.engine.players.add(newPlayer);
   room.clients[clientId] = channel;
   _channelToPlayer[channel] = clientId;

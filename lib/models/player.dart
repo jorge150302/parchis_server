@@ -32,9 +32,10 @@ class Player {
   int consecutiveSixes;
   int extraTurns;
   bool isAI;
-  bool isAutoPlaying; // NUEVO: Estado AFK persistente
-  bool isConnected; // NUEVO: Estado de conexión
+  bool isAutoPlaying;
+  bool isConnected;
   int lastDiceValue;
+  int level; // NUEVO: Nivel del jugador para el sistema Online
 
   Player({
     required this.id,
@@ -47,6 +48,7 @@ class Player {
     this.isAutoPlaying = false,
     this.isConnected = true,
     this.lastDiceValue = 0,
+    this.level = 1,
   }) : tokens = List.generate(numTokens, (i) => Token(id: i));
 
   void resetToStart() {
@@ -85,5 +87,6 @@ class Player {
         'extraTurns': extraTurns,
         'consecutiveSixes': consecutiveSixes,
         'lastDiceValue': lastDiceValue,
+        'level': level,
       };
 }
