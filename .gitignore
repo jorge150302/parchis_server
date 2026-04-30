@@ -20,3 +20,6 @@ build/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Firebase service account — NEVER commit this file
+service_account.json
