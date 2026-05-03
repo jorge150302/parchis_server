@@ -2,9 +2,7 @@
 
 enum BoardActionType { goToStart, moveTo, skipTurn, rollAgain }
 
-class BoardAction {
-  final BoardActionType type;
-  final int? targetNumber; // solo para moveTo
+class BoardAction { // solo para moveTo
 
   BoardAction.goToStart()
       : type = BoardActionType.goToStart,
@@ -21,4 +19,6 @@ class BoardAction {
   BoardAction.rollAgain()
       : type = BoardActionType.rollAgain,
         targetNumber = null;
+  final BoardActionType type;
+  final int? targetNumber;
 }

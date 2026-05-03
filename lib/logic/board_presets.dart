@@ -1,9 +1,9 @@
 // Contenido para parchis_server/lib/logic/board_presets.dart
 
-import '../models/board_action.dart';
+import 'package:parchis_server/models/board_action.dart';
 
 final classicActionPositions = [
-  13, 15, 19, 24, 29, 37, 43, 49, 56, 66, 72, 76, 79, 83, 93, 97
+  13, 15, 19, 24, 29, 37, 43, 49, 56, 66, 72, 76, 79, 83, 93, 97,
 ];
 
 final classicActions = [

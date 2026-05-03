@@ -2,9 +2,9 @@
 
 import 'dart:math';
 
-import 'models/board.dart';
-import 'models/player.dart';
-import 'models/board_action.dart';
+import 'package:parchis_server/models/board.dart';
+import 'package:parchis_server/models/player.dart';
+import 'package:parchis_server/models/board_action.dart';
 
 enum GamePhase {
   idle,
@@ -15,6 +15,11 @@ enum GamePhase {
 }
 
 class GameEngine {
+
+  GameEngine({
+    required this.board,
+    required this.players,
+  });
   final Board board;
   final List<Player> players;
   final Random _random = Random();
@@ -23,11 +28,6 @@ class GameEngine {
   int _currentPlayerIndex = 0;
   GamePhase phase = GamePhase.idle;
   int lastDiceValue = 0;
-
-  GameEngine({
-    required this.board,
-    required this.players,
-  });
 
   Player get currentPlayer => players[_currentPlayerIndex];
 
@@ -97,8 +97,8 @@ class GameEngine {
     if (targetPos > board.finalPosition) return false;
 
     // Puentes (Bloqueos). No se puede saltar ni caer en un puente.
-    for (int i = 1; i <= steps; i++) {
-      int checkPos = token.position + i;
+    for (var i = 1; i <= steps; i++) {
+      var checkPos = token.position + i;
       if (isBridge(checkPos, currentPlayer)) return false;
     }
 
@@ -135,14 +135,13 @@ class GameEngine {
 
     final cell = board.getCell(token.position);
     final action = cell.action;
-    bool sentHome = false;
+    var sentHome = false;
 
     if (action != null) {
       switch (action.type) {
         case BoardActionType.goToStart:
           token.reset();
           sentHome = true;
-          break;
         case BoardActionType.moveTo:
           if (action.targetNumber != null) {
             token.position = action.targetNumber!;
@@ -154,13 +153,10 @@ class GameEngine {
               }
             }
           }
-          break;
         case BoardActionType.skipTurn:
           player.addSkip(1);
-          break;
         case BoardActionType.rollAgain:
           player.extraTurns++;
-          break;
       }
     }
     return sentHome;
@@ -169,7 +165,7 @@ class GameEngine {
   bool resolveCollisions(Token token) {
     if (token.isFinished) return false;
 
-    bool sentHome = false;
+    var sentHome = false;
     for (final otherPlayer in players) {
       if (otherPlayer.id == currentPlayer.id) continue;
 

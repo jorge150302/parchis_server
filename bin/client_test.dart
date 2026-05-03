@@ -6,11 +6,11 @@ void main() async {
   final channel = IOWebSocketChannel.connect('ws://localhost:8080/ws');
   print('✅ Conectado al servidor de Parchís');
 
-  final String myClientId = 'Client_${DateTime.now().millisecondsSinceEpoch}';
+  final myClientId = 'Client_${DateTime.now().millisecondsSinceEpoch}';
 
   channel.stream.listen((dynamic message) {
     try {
-      final String rawMessage = message is List<int> 
+      final rawMessage = message is List<int> 
           ? utf8.decode(message) 
           : message as String;
 
@@ -21,34 +21,27 @@ void main() async {
       switch (eventName) {
         case 'game_created':
           print('\n🏠 SALA CREADA: ${data['roomCode']}');
-          break;
         case 'game_joined':
           print('\n🤝 UNIDO CON ÉXITO. Jugadores en sala: ${data['playerCount']}');
-          break;
         case 'game_state':
           print('\n--- TABLERO ---');
           print('Sala: ${data['roomCode']}');
           final players = data['players'] as List<dynamic>;
           for (final p in players) {
             final player = p as Map<String, dynamic>;
-            final String isMe = player['id'] == myClientId ? ' (YO)' : '';
+            final isMe = player['id'] == myClientId ? ' (YO)' : '';
             print('👤 [Slot ${player['index']}] ${player['name']} | Pos: ${player['position']} | AI: ${player['isAI']}$isMe');
           }
-          final String turnText = data['currentPlayerId'] == myClientId ? '¡TU TURNO!' : (data['currentPlayerId'] as String);
+          final turnText = data['currentPlayerId'] == myClientId ? '¡TU TURNO!' : (data['currentPlayerId'] as String);
           print('👉 Turno de: $turnText');
-          break;
         case 'dice_result':
           print('\n🎲 DADO: ${data['diceValue']} (Por: ${data['playerId']})');
-          break;
         case 'game_event':
           print('\n🔔 EVENTO: ${data['message']}');
-          break;
         case 'chat':
           print('\n💬 [${data['sender']}]: ${data['message']}');
-          break;
         case 'error':
           print('\n❌ ERROR: ${data['message']}');
-          break;
       }
     } catch (e) {
       print('Error procesando respuesta del servidor: $e');
@@ -69,8 +62,8 @@ void main() async {
       channel.sink.add(jsonEncode({
         'event': 'create_game',
         'clientId': myClientId,
-        'data': {'name': 'Anfitrión'}
-      }));
+        'data': {'name': 'Anfitrión'},
+      }),);
     } else if (input.startsWith('join ')) {
       final parts = input.split(' ');
       if (parts.length < 2) return;
@@ -78,19 +71,19 @@ void main() async {
       channel.sink.add(jsonEncode({
         'event': 'join_game',
         'clientId': myClientId,
-        'data': {'roomCode': code, 'name': 'Tester'}
-      }));
+        'data': {'roomCode': code, 'name': 'Tester'},
+      }),);
     } else if (input == 'roll') {
       channel.sink.add(jsonEncode({
         'event': 'roll_dice',
-        'clientId': myClientId
-      }));
+        'clientId': myClientId,
+      }),);
     } else {
       channel.sink.add(jsonEncode({
         'event': 'chat_message',
         'clientId': myClientId,
-        'data': {'message': input}
-      }));
+        'data': {'message': input},
+      }),);
     }
   });
 }

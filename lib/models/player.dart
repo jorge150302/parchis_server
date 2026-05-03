@@ -1,15 +1,15 @@
 // Contenido actualizado para parchis_server/lib/models/player.dart
 
 class Token {
-  final int id;
-  int position;
-  bool isFinished;
 
   Token({
     required this.id,
     this.position = 0,
     this.isFinished = false,
   });
+  final int id;
+  int position;
+  bool isFinished;
 
   void reset() {
     position = 0;
@@ -24,18 +24,6 @@ class Token {
 }
 
 class Player {
-  final String id;
-  final String name;
-
-  List<Token> tokens;
-  int skippedTurns;
-  int consecutiveSixes;
-  int extraTurns;
-  bool isAI;
-  bool isAutoPlaying;
-  bool isConnected;
-  int lastDiceValue;
-  int level; // NUEVO: Nivel del jugador para el sistema Online
 
   Player({
     required this.id,
@@ -49,7 +37,23 @@ class Player {
     this.isConnected = true,
     this.lastDiceValue = 0,
     this.level = 1,
+    this.avatarType = 'google',
+    this.avatarIconId,
   }) : tokens = List.generate(numTokens, (i) => Token(id: i));
+  final String id;
+  final String name;
+
+  List<Token> tokens;
+  int skippedTurns;
+  int consecutiveSixes;
+  int extraTurns;
+  bool isAI;
+  bool isAutoPlaying;
+  bool isConnected;
+  int lastDiceValue;
+  int level;
+  String avatarType;
+  String? avatarIconId;
 
   void resetToStart() {
     for (final token in tokens) {
@@ -88,5 +92,7 @@ class Player {
         'consecutiveSixes': consecutiveSixes,
         'lastDiceValue': lastDiceValue,
         'level': level,
+        'avatarType': avatarType,
+        'avatarIconId': avatarIconId,
       };
 }

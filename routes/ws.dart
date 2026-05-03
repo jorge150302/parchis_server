@@ -116,7 +116,7 @@ Future<Response> onRequest(RequestContext context) async {
 
           // 2. Quitamos el canal activo pero mantenemos al jugador en la sala
           room.clients.remove(playerId);
-          _broadcastInfo(roomCode, '${playerId} se ha desconectado. Esperando reconexión (2 min)...');
+          _broadcastInfo(roomCode, '$playerId se ha desconectado. Esperando reconexión (2 min)...');
         }
       }
       _channelToPlayer.remove(channel);
@@ -130,7 +130,9 @@ Future<Response> onRequest(RequestContext context) async {
           final eventName = event['event'] as String;
           final data = (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
           final clientId = event['clientId'] as String?;
-          final level = event['level'] as int? ?? 1; // REQUERIMIENTO: Extraer nivel del payload
+          final level = event['level'] as int? ?? 1;
+          final avatarType = event['avatarType'] as String? ?? 'google';
+          final avatarIconId = event['avatarIconId'] as String?;
 
           // REQUERIMIENTO: Soporte para Ping/Pong
           if (eventName == 'ping') {
@@ -205,7 +207,7 @@ Future<Response> onRequest(RequestContext context) async {
               }
             }
             if (foundRoom != null) {
-              _joinToRoom(channel, foundRoom, clientId, data['name'] as String?, level);
+              _joinToRoom(channel, foundRoom, clientId, data['name'] as String?, level, avatarType, avatarIconId);
             } else {
               _sendError(channel, 'No hay salas.', code: 'MATCH_NOT_FOUND');
             }
@@ -213,13 +215,16 @@ Future<Response> onRequest(RequestContext context) async {
           }
 
           if (eventName == 'create_game') {
-            _createAndJoinRoom(channel, clientId, data['name'] as String?, (data['maxPlayers'] as int?) ?? 2, (data['isPublic'] as bool?) ?? false, level);
+            _createAndJoinRoom(channel, clientId, data['name'] as String?, (data['maxPlayers'] as int?) ?? 2, (data['isPublic'] as bool?) ?? false, level, avatarType, avatarIconId);
           }
 
           if (eventName == 'join_game') {
             final room = _rooms[data['roomCode'] ?? ''];
-            if (room != null) _joinToRoom(channel, room, clientId, data['name'] as String?, level);
-            else _sendError(channel, 'La sala no existe.');
+            if (room != null) {
+              _joinToRoom(channel, room, clientId, data['name'] as String?, level, avatarType, avatarIconId);
+            } else {
+              _sendError(channel, 'La sala no existe.');
+            }
           }
 
           if (eventName == 'roll_dice') {
@@ -316,13 +321,13 @@ void _updatePlayerLevel(String clientId, int level) {
 
 // --- Funciones de Gestión de Salas ---
 
-void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name, int maxPlayers, bool isPublic, int level) {
+void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name, int maxPlayers, bool isPublic, int level, String avatarType, String? avatarIconId) {
   final roomCode = (DateTime.now().millisecondsSinceEpoch % 100000).toString().padLeft(5, '0');
   final board = generateBoard(classicActionPositions, classicActions);
   final engine = GameEngine(board: board, players: []);
   final room = GameRoom(roomCode, engine, maxPlayers, isPublic: isPublic);
   _rooms[roomCode] = room;
-  final newPlayer = Player(id: clientId, name: name ?? 'Anfitrión', level: level);
+  final newPlayer = Player(id: clientId, name: name ?? 'Anfitrión', level: level, avatarType: avatarType, avatarIconId: avatarIconId);
   room.engine.players.add(newPlayer);
   room.clients[clientId] = channel;
   _channelToPlayer[channel] = clientId;
@@ -341,15 +346,17 @@ void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name,
   }
 }
 
-void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, String? name, int level) {
+void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, String? name, int level, String avatarType, String? avatarIconId) {
   final existingPlayerIndex = room.engine.players.indexWhere((p) => p.id == clientId);
   if (existingPlayerIndex != -1) {
     _reconnectionTimers[clientId]?.cancel();
     _reconnectionTimers.remove(clientId);
     final player = room.engine.players[existingPlayerIndex];
-    player.isAI = false; 
+    player.isAI = false;
     player.isConnected = true;
-    player.level = level; // REQUERIMIENTO: Actualizar nivel al reconectar
+    player.level = level;
+    player.avatarType = avatarType;
+    player.avatarIconId = avatarIconId;
     room.clients[clientId] = channel;
     _channelToPlayer[channel] = clientId;
     _channelToRoom[channel] = room.code;
@@ -364,13 +371,13 @@ void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, Strin
     _sendError(channel, 'Sala no disponible.'); return;
   }
 
-  final newPlayer = Player(id: clientId, name: name ?? 'Jugador ${room.engine.players.length + 1}', level: level);
+  final newPlayer = Player(id: clientId, name: name ?? 'Jugador ${room.engine.players.length + 1}', level: level, avatarType: avatarType, avatarIconId: avatarIconId);
   room.engine.players.add(newPlayer);
   room.clients[clientId] = channel;
   _channelToPlayer[channel] = clientId;
   _channelToRoom[channel] = room.code;
 
-  bool gameJustStarted = false;
+  var gameJustStarted = false;
   if (room.engine.players.length == room.maxPlayers) {
     room.engine.phase = GamePhase.rolling;
     gameJustStarted = true;
@@ -432,7 +439,9 @@ void _handleMoveToken(WebSocketChannel? channel, int tokenId, {String? roomCode,
   _broadcastGameState(rCode);
   Timer(const Duration(milliseconds: 500), () {
     final diceValue = room.engine.lastDiceValue;
-    for (var i = 0; i < diceValue; i++) room.engine.stepForward(token);
+    for (var i = 0; i < diceValue; i++) {
+      room.engine.stepForward(token);
+    }
     room.engine.applyCellAction(room.engine.currentPlayer, token);
     if (room.engine.resolveCollisions(token)) room.engine.currentPlayer.extraTurns++;
     if (token.isFinished) room.engine.currentPlayer.extraTurns++;
@@ -457,14 +466,18 @@ void _handleTimeout(String roomCode) {
     _broadcastGameState(roomCode);
   }
 
-  if (room.engine.phase == GamePhase.rolling) _handleRollDice(null, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
-  else if (room.engine.phase == GamePhase.choosingToken) {
-    Token? best; int max = -1;
+  if (room.engine.phase == GamePhase.rolling) {
+    _handleRollDice(null, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
+  } else if (room.engine.phase == GamePhase.choosingToken) {
+    Token? best; var max = -1;
     for (final t in room.engine.currentPlayer.tokens) {
       if (room.engine.canMove(t, room.engine.lastDiceValue) && t.position > max) { max = t.position; best = t; }
     }
-    if (best != null) _handleMoveToken(null, best.id, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
-    else _moveToNextTurnWithSkips(roomCode);
+    if (best != null) {
+      _handleMoveToken(null, best.id, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
+    } else {
+      _moveToNextTurnWithSkips(roomCode);
+    }
   }
 }
 
@@ -477,7 +490,9 @@ void _moveToNextTurnWithSkips(String roomCode) {
     room.engine.nextTurn();
     if (room.engine.phase == GamePhase.finished) break;
     if (room.engine.currentPlayer.mustSkipTurn) { room.engine.currentPlayer.consumeSkip(); skip = true; }
-    else skip = false;
+    else {
+      skip = false;
+    }
   } while (skip);
   _broadcastGameState(roomCode);
   if (room.engine.phase != GamePhase.finished) room.startTimer(() => _handleTimeout(roomCode));
@@ -493,13 +508,13 @@ void _sendError(WebSocketChannel c, String m, {String? code}) => c.sink.add(json
 void _broadcastGameState(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
-  String phaseStr = 'idle';
+  var phaseStr = 'idle';
   switch (room.engine.phase) {
-    case GamePhase.idle: phaseStr = 'idle'; break;
-    case GamePhase.rolling: phaseStr = 'rolling'; break;
-    case GamePhase.choosingToken: phaseStr = 'choosing_token'; break;
-    case GamePhase.moving: phaseStr = 'moving'; break;
-    case GamePhase.finished: phaseStr = 'finished'; break;
+    case GamePhase.idle: phaseStr = 'idle';
+    case GamePhase.rolling: phaseStr = 'rolling';
+    case GamePhase.choosingToken: phaseStr = 'choosing_token';
+    case GamePhase.moving: phaseStr = 'moving';
+    case GamePhase.finished: phaseStr = 'finished';
   }
   room.broadcast({
     'event': 'game_state',

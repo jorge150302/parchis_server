@@ -1,11 +1,11 @@
 // Contenido para parchis_server/lib/models/board.dart
 
-import 'cell.dart';
+import 'package:parchis_server/models/cell.dart';
 
 class Board {
-  final List<Cell> cells;
 
   Board(this.cells);
+  final List<Cell> cells;
 
   int get finalPosition => cells.length;
 
