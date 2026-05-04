@@ -3,10 +3,10 @@ import 'dart:convert';
 
 import 'package:dart_frog/dart_frog.dart';
 import 'package:dart_frog_web_socket/dart_frog_web_socket.dart';
+import 'package:parchis_server/firebase_admin.dart';
 import 'package:parchis_server/game_engine.dart';
 import 'package:parchis_server/logic/board_generator.dart';
 import 'package:parchis_server/logic/board_presets.dart';
-import 'package:parchis_server/models/board_action.dart';
 import 'package:parchis_server/models/player.dart';
 
 // --- Clases de Soporte ---
@@ -124,15 +124,17 @@ Future<Response> onRequest(RequestContext context) async {
     }
 
     channel.stream.listen(
-      (dynamic message) {
+      (dynamic message) async {
         try {
           final event = jsonDecode(message as String) as Map<String, dynamic>;
           final eventName = event['event'] as String;
-          final data = (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
+          final data = (event['data'] ?? <String, dynamic>{})
+              as Map<String, dynamic>;
           final clientId = event['clientId'] as String?;
           final level = event['level'] as int? ?? 1;
           final avatarType = event['avatarType'] as String? ?? 'google';
           final avatarIconId = event['avatarIconId'] as String?;
+          final idToken = event['idToken'] as String?;
 
           // REQUERIMIENTO: Soporte para Ping/Pong
           if (eventName == 'ping') {
@@ -198,16 +200,24 @@ Future<Response> onRequest(RequestContext context) async {
           }
 
           if (eventName == 'find_match') {
+            if (!await verifyIdToken(idToken)) {
+              _sendError(channel, 'Auth required.', code: 'UNAUTHORIZED');
+              return;
+            }
             final targetMaxPlayers = (data['maxPlayers'] as int?) ?? 2;
             GameRoom? foundRoom;
             for (final room in _rooms.values) {
-              if (room.isPublic && room.maxPlayers == targetMaxPlayers && 
-                  room.engine.players.length < room.maxPlayers && room.engine.phase == GamePhase.idle) {
-                foundRoom = room; break;
+              if (room.isPublic &&
+                  room.maxPlayers == targetMaxPlayers &&
+                  room.engine.players.length < room.maxPlayers &&
+                  room.engine.phase == GamePhase.idle) {
+                foundRoom = room;
+                break;
               }
             }
             if (foundRoom != null) {
-              _joinToRoom(channel, foundRoom, clientId, data['name'] as String?, level, avatarType, avatarIconId);
+              _joinToRoom(channel, foundRoom, clientId,
+                  data['name'] as String?, level, avatarType, avatarIconId,);
             } else {
               _sendError(channel, 'No hay salas.', code: 'MATCH_NOT_FOUND');
             }
@@ -215,13 +225,27 @@ Future<Response> onRequest(RequestContext context) async {
           }
 
           if (eventName == 'create_game') {
-            _createAndJoinRoom(channel, clientId, data['name'] as String?, (data['maxPlayers'] as int?) ?? 2, (data['isPublic'] as bool?) ?? false, level, avatarType, avatarIconId);
+            if (!await verifyIdToken(idToken)) {
+              _sendError(channel, 'Auth required.', code: 'UNAUTHORIZED');
+              return;
+            }
+            _createAndJoinRoom(
+              channel, clientId, data['name'] as String?,
+              (data['maxPlayers'] as int?) ?? 2,
+              (data['isPublic'] as bool?) ?? false,
+              level, avatarType, avatarIconId,
+            );
           }
 
           if (eventName == 'join_game') {
+            if (!await verifyIdToken(idToken)) {
+              _sendError(channel, 'Auth required.', code: 'UNAUTHORIZED');
+              return;
+            }
             final room = _rooms[data['roomCode'] ?? ''];
             if (room != null) {
-              _joinToRoom(channel, room, clientId, data['name'] as String?, level, avatarType, avatarIconId);
+              _joinToRoom(channel, room, clientId,
+                  data['name'] as String?, level, avatarType, avatarIconId,);
             } else {
               _sendError(channel, 'La sala no existe.');
             }
