@@ -332,6 +332,28 @@ Future<Response> onRequest(RequestContext context) async {
             return;
           }
 
+          // --- Winner leaving voluntarily after winning ---
+          if (eventName == 'leave_match') {
+            final roomCode = _channelToRoom[channel];
+            if (roomCode != null) {
+              final room = _rooms[roomCode];
+              if (room != null) {
+                final player = room.engine.players.firstWhere(
+                  (p) => p.id == clientId,
+                  orElse: () => Player(id: '', name: ''),
+                );
+                if (player.id.isNotEmpty && player.isFinished) {
+                  room.clients.remove(clientId);
+                  _channelToPlayer.remove(channel);
+                  _channelToRoom.remove(channel);
+                  _broadcastInfo(roomCode, '${player.name} won and left the match.');
+                  _broadcastGameState(roomCode);
+                }
+              }
+            }
+            return;
+          }
+
           // --- REQUERIMIENTO AFK: toggle_auto_play ---
           if (eventName == 'toggle_auto_play') {
             final value = data['value'] as bool? ?? false;
