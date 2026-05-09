@@ -21,6 +21,8 @@ class GameRoom {
   final Map<String, WebSocketChannel> clients = {}; // PlayerID -> Channel
 
   Timer? turnTimer;
+  Timer? maxDurationTimer;
+  Timer? zombieCleanupTimer;
   int remainingSeconds = 20;
 
   void broadcast(Map<String, dynamic> event) {
@@ -33,6 +35,17 @@ class GameRoom {
   void stopTimer() {
     turnTimer?.cancel();
     turnTimer = null;
+  }
+
+  void startMaxDurationTimer(void Function() onExpired) {
+    maxDurationTimer?.cancel();
+    maxDurationTimer = Timer(const Duration(minutes: 90), onExpired);
+  }
+
+  void stopAll() {
+    turnTimer?.cancel();
+    maxDurationTimer?.cancel();
+    zombieCleanupTimer?.cancel();
   }
 
   void startTimer(void Function() onTimeout) {
@@ -114,9 +127,26 @@ Future<Response> onRequest(RequestContext context) async {
             _reconnectionTimers.remove(playerId);
           });
 
-          // 2. Quitamos el canal activo pero mantenemos al jugador en la sala
+          // 2. Remove active channel but keep player in room
           room.clients.remove(playerId);
-          _broadcastInfo(roomCode, '$playerId se ha desconectado. Esperando reconexión (2 min)...');
+          _broadcastInfo(
+            roomCode,
+            '$playerId se ha desconectado. '
+            'Esperando reconexión (2 min)...',
+          );
+
+          // 3. Zombie cleanup — if all clients drop, remove room after 5 min
+          if (room.clients.isEmpty) {
+            room.zombieCleanupTimer?.cancel();
+            room.zombieCleanupTimer = Timer(
+              const Duration(minutes: 5),
+              () {
+                if (_rooms[roomCode]?.clients.isEmpty ?? false) {
+                  _rooms.remove(roomCode)?.stopAll();
+                }
+              },
+            );
+          }
         }
       }
       _channelToPlayer.remove(channel);
@@ -412,6 +442,9 @@ void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, Strin
 
   if (gameJustStarted) {
     room.startTimer(() => _handleTimeout(room.code));
+    room.startMaxDurationTimer(() {
+      _rooms.remove(room.code)?.stopAll();
+    });
   }
 }
 
@@ -439,13 +472,11 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
       _broadcastGameState(rCode);
       room.startTimer(() => _handleTimeout(rCode));
     } else {
-      if (diceValue == 6) { 
-        room.engine.phase = GamePhase.rolling; 
-        _broadcastGameState(rCode); 
-        room.startTimer(() => _handleTimeout(rCode)); 
-      } else {
-        _moveToNextTurnWithSkips(rCode);
+      // Cancel extra turn from registerSix — no move possible, turn forfeits
+      if (diceValue == 6 && room.engine.currentPlayer.extraTurns > 0) {
+        room.engine.currentPlayer.extraTurns--;
       }
+      _moveToNextTurnWithSkips(rCode);
     }
   }
 }
@@ -473,8 +504,12 @@ void _handleMoveToken(WebSocketChannel? channel, int tokenId, {String? roomCode,
     else if (room.engine.currentPlayer.extraTurns > 0 || diceValue == 6) {
       if (room.engine.currentPlayer.extraTurns > 0) room.engine.currentPlayer.extraTurns--;
       room.engine.phase = GamePhase.rolling; _broadcastGameState(rCode); room.startTimer(() => _handleTimeout(rCode));
-    } else _moveToNextTurnWithSkips(rCode);
-    if (room.engine.phase == GamePhase.finished) Timer(const Duration(seconds: 10), () => _rooms.remove(rCode));
+    } else {
+      _moveToNextTurnWithSkips(rCode);
+    }
+    if (room.engine.phase == GamePhase.finished) {
+      Timer(const Duration(seconds: 10), () => _rooms.remove(rCode));
+    }
   });
 }
 
