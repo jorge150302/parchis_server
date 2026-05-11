@@ -1,24 +1,28 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:dart_firebase_admin/firestore.dart' show FieldValue;
 import 'package:dart_frog/dart_frog.dart';
 import 'package:dart_frog_web_socket/dart_frog_web_socket.dart';
 import 'package:parchis_server/firebase_admin.dart';
 import 'package:parchis_server/game_engine.dart';
 import 'package:parchis_server/logic/board_generator.dart';
 import 'package:parchis_server/logic/board_presets.dart';
+import 'package:parchis_server/models/board_action.dart';
 import 'package:parchis_server/models/player.dart';
 
 // --- Clases de Soporte ---
 
 class GameRoom {
-  GameRoom(this.code, this.engine, this.maxPlayers, {this.isPublic = false});
+  GameRoom(this.code, this.engine, this.maxPlayers, {this.isPublic = false, this.testMode = false});
 
   final String code;
   final GameEngine engine;
   final int maxPlayers;
   bool isPublic;
-  final Map<String, WebSocketChannel> clients = {}; // PlayerID -> Channel
+  final bool testMode;
+  final Map<String, WebSocketChannel> clients = {}; // clientId → channel
+  final Map<String, String> playerUids = {};        // clientId → Firebase UID
 
   Timer? turnTimer;
   Timer? maxDurationTimer;
@@ -50,11 +54,9 @@ class GameRoom {
 
   void startTimer(void Function() onTimeout) {
     stopTimer();
-    
+
     final currentPlayer = engine.currentPlayer;
-    
-    // REQUERIMIENTO AFK: Si el jugador es IA o está en modo Auto-Play, el servidor ejecuta la acción
-    // tras un retardo de cortesía (6s) para que el resto de jugadores vean qué sucede.
+
     if (currentPlayer.isAI || currentPlayer.isAutoPlaying) {
       turnTimer = Timer(const Duration(milliseconds: 6000), onTimeout);
       return;
@@ -87,70 +89,175 @@ class GameRoom {
 final Map<String, GameRoom> _rooms = {};
 final Map<WebSocketChannel, String> _channelToPlayer = {};
 final Map<WebSocketChannel, String> _channelToRoom = {};
-
-// Temporizadores de limpieza para reconexión (clientId -> Timer)
 final Map<String, Timer> _reconnectionTimers = {};
-
-// Simulamos una base de datos de usuarios y reportes en memoria
 final Map<String, Map<String, dynamic>> _userDatabase = {};
 final List<Map<String, dynamic>> _playerReports = [];
+// UID → roomCode — updated synchronously so multi-device checks are race-free.
+final Map<String, String> _activeUids = {};
+// UID → clientId — enforces single session per account.
+// clientId is a persistent device UUID (SharedPreferences), stable across reconnects.
+// Different devices have different clientIds, so reconnects from the same device are never blocked.
+final Map<String, String> _uidSessions = {};
+
+// --- Firestore helpers ---
+
+Future<void> _setActiveMatch(String uid, String roomCode) async {
+  if (!isAdminConfigured) return;
+  try {
+    await getAdminFirestore()
+        .collection('users')
+        .doc(uid)
+        .update({'active_match_id': roomCode});
+  } catch (_) {}
+}
+
+Future<void> _clearActiveMatch(String uid) async {
+  _activeUids.remove(uid);
+  if (!isAdminConfigured) return;
+  try {
+    await getAdminFirestore()
+        .collection('users')
+        .doc(uid)
+        .update({'active_match_id': null});
+  } catch (_) {}
+}
+
+/// Records an abandoned match (grace period expiry) — increments matches_played.
+Future<void> _recordMatchAbandoned(String uid) async {
+  _activeUids.remove(uid);
+  if (!isAdminConfigured) return;
+  try {
+    await getAdminFirestore().collection('users').doc(uid).update({
+      'matches_played': const FieldValue.increment(1),
+      'active_match_id': null,
+    });
+  } catch (_) {}
+}
+
+/// Resolves the Firebase UID from [idToken], stores it in the room, and writes
+/// active_match_id to Firestore. Safe to call with a null token (no-op).
+Future<void> _storeUidAndSetActiveMatch(
+  GameRoom room,
+  String clientId,
+  String? idToken,
+  String roomCode,
+) async {
+  final uid = await getUidFromToken(idToken);
+  if (uid == null) return;
+  room.playerUids[clientId] = uid;
+  _activeUids[uid] = roomCode; // update from __pending__ to real room code
+  await _setActiveMatch(uid, roomCode);
+}
+
+/// Sends `you_finished` to the player's channel and clears their active_match_id.
+/// Safe to call multiple times — removes the UID on first call so subsequent
+/// calls are no-ops.
+void _notifyAndClearPlayerFinish(String roomCode, Player player) {
+  final room = _rooms[roomCode];
+  if (room == null) return;
+  final rank = room.engine.finishedPlayers.indexOf(player) + 1;
+  final channel = room.clients[player.id];
+  channel?.sink.add(jsonEncode({
+    'event': 'you_finished',
+    'data': {
+      'position': rank,
+      'totalPlayers': room.engine.players.length,
+    },
+  }));
+  final uid = room.playerUids.remove(player.id);
+  if (uid != null) unawaited(_clearActiveMatch(uid));
+}
+
+// --- WebSocket handler ---
 
 Future<Response> onRequest(RequestContext context) async {
   final handler = webSocketHandler((channel, protocol) {
-    
+
     void handleDisconnect() {
       final roomCode = _channelToRoom[channel];
       final playerId = _channelToPlayer[channel];
-      
+
       if (roomCode != null && playerId != null) {
         final room = _rooms[roomCode];
         if (room != null) {
-          // Buscamos al jugador para actualizar su estado de conexión
-          final player = room.engine.players.firstWhere((p) => p.id == playerId, orElse: () => Player(id: '', name: ''));
+          final player = room.engine.players.firstWhere(
+            (p) => p.id == playerId,
+            orElse: () => Player(id: '', name: ''),
+          );
           if (player.id.isNotEmpty) {
-            // REQUERIMIENTO: Marcar como desconectado y activar Auto-Play
             player.isConnected = false;
             player.isAutoPlaying = true;
             _broadcastGameState(roomCode);
           }
 
-          // 1. Iniciamos un temporizador de gracia de 2 minutos para la reconexión
+          // Pre-game waiting room: destroy immediately — no grace period needed.
+          if (room.engine.phase == GamePhase.idle) {
+            room.clients.remove(playerId);
+            _channelToPlayer.remove(channel);
+            _channelToRoom.remove(channel);
+            final orphanRoom = _rooms.remove(roomCode);
+            if (orphanRoom != null) {
+              orphanRoom.broadcast({'event': 'error', 'data': {'code': 'ROOM_CLOSED', 'message': 'Room closed'}});
+              final uid = orphanRoom.playerUids.remove(playerId);
+              if (uid != null) unawaited(_clearActiveMatch(uid));
+              for (final uid2 in orphanRoom.playerUids.values) {
+                unawaited(_clearActiveMatch(uid2));
+              }
+              orphanRoom.playerUids.clear();
+              orphanRoom.stopAll();
+            }
+            return;
+          }
+
+          // Grace period: 90 seconds before permanently converting to AI.
           _reconnectionTimers[playerId]?.cancel();
-          _reconnectionTimers[playerId] = Timer(const Duration(minutes: 2), () {
-            // Si pasan 2 minutos sin reconexión, marcamos como IA definitiva
-            final p = room.engine.players.firstWhere((p) => p.id == playerId, orElse: () => Player(id: '', name: ''));
+          _reconnectionTimers[playerId] = Timer(const Duration(seconds: 90), () {
+            final p = room.engine.players.firstWhere(
+              (p) => p.id == playerId,
+              orElse: () => Player(id: '', name: ''),
+            );
             if (p.id.isNotEmpty) {
               p.isAI = true;
               _broadcastGameState(roomCode);
               _broadcastInfo(roomCode, '${p.name} abandonó la partida definitivamente.');
+              // Clear active_match_id and count the abandoned match.
+              final uid = room.playerUids.remove(playerId);
+              if (uid != null) unawaited(_recordMatchAbandoned(uid));
             }
             _reconnectionTimers.remove(playerId);
           });
 
-          // 2. Remove active channel but keep player in room
           room.clients.remove(playerId);
-          _broadcastInfo(
-            roomCode,
-            '$playerId se ha desconectado. '
-            'Esperando reconexión (2 min)...',
-          );
+          _broadcastInfo(roomCode, '$playerId se ha desconectado. Esperando reconexión (90 s)...');
 
-          // 3. Zombie cleanup — if all clients drop, remove room after 5 min
+          // Zombie cleanup — remove room if all clients drop for 5 min.
           if (room.clients.isEmpty) {
             room.zombieCleanupTimer?.cancel();
-            room.zombieCleanupTimer = Timer(
-              const Duration(minutes: 5),
-              () {
-                if (_rooms[roomCode]?.clients.isEmpty ?? false) {
-                  _rooms.remove(roomCode)?.stopAll();
+            room.zombieCleanupTimer = Timer(const Duration(minutes: 5), () {
+              if (_rooms[roomCode]?.clients.isEmpty ?? false) {
+                final orphanRoom = _rooms.remove(roomCode);
+                if (orphanRoom != null) {
+                  // Clear active_match_id for any remaining players.
+                  for (final uid in orphanRoom.playerUids.values) {
+                    unawaited(_clearActiveMatch(uid));
+                  }
+                  orphanRoom.playerUids.clear();
+                  orphanRoom.stopAll();
                 }
-              },
-            );
+              }
+            });
           }
         }
       }
+      final disconnectedClientId = _channelToPlayer[channel];
       _channelToPlayer.remove(channel);
       _channelToRoom.remove(channel);
+      // Free the session slot so the account can reconnect.
+      // Only remove if the stored clientId matches the disconnecting device —
+      // prevents a reconnecting device from wiping another device's slot.
+      if (disconnectedClientId != null) {
+        _uidSessions.removeWhere((_, cId) => cId == disconnectedClientId);
+      }
     }
 
     channel.stream.listen(
@@ -158,15 +265,13 @@ Future<Response> onRequest(RequestContext context) async {
         try {
           final event = jsonDecode(message as String) as Map<String, dynamic>;
           final eventName = event['event'] as String;
-          final data = (event['data'] ?? <String, dynamic>{})
-              as Map<String, dynamic>;
+          final data = (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
           final clientId = event['clientId'] as String?;
           final level = event['level'] as int? ?? 1;
           final avatarType = event['avatarType'] as String? ?? 'google';
           final avatarIconId = event['avatarIconId'] as String?;
           final idToken = event['idToken'] as String?;
 
-          // REQUERIMIENTO: Soporte para Ping/Pong
           if (eventName == 'ping') {
             channel.sink.add(jsonEncode({'event': 'pong'}));
             return;
@@ -177,8 +282,21 @@ Future<Response> onRequest(RequestContext context) async {
             return;
           }
 
-          // --- EVENTO: request_sync ---
+          // --- request_sync: player reconnects after disconnect ---
           if (eventName == 'request_sync') {
+            // Single-session check: reject if another device holds this account.
+            final syncUid = await getUidFromToken(idToken);
+            if (syncUid != null) {
+              final existingClientId = _uidSessions[syncUid];
+              if (existingClientId != null && existingClientId != clientId) {
+                _sendError(channel,
+                    'Hay otro dispositivo conectado a esta cuenta.',
+                    code: 'SESSION_CONFLICT');
+                return;
+              }
+              _uidSessions[syncUid] = clientId;
+            }
+
             _reconnectionTimers[clientId]?.cancel();
             _reconnectionTimers.remove(clientId);
 
@@ -192,18 +310,33 @@ Future<Response> onRequest(RequestContext context) async {
 
             if (userRoom != null) {
               final player = userRoom.engine.players.firstWhere((p) => p.id == clientId);
+              if (player.isAI) {
+                _sendError(channel, 'No se encontró una partida activa para este ID.',
+                    code: 'MATCH_NOT_FOUND');
+                return;
+              }
+
               player.isConnected = true;
-              player.level = level; // REQUERIMIENTO: Actualizar nivel al sincronizar
+              player.level = level;
+
+              final oldChannel = userRoom.clients[clientId];
+              if (oldChannel != null && oldChannel != channel) {
+                _channelToPlayer.remove(oldChannel);
+                _channelToRoom.remove(oldChannel);
+                try { oldChannel.sink.close(); } catch (_) {}
+              }
 
               userRoom.clients[clientId] = channel;
               _channelToPlayer[channel] = clientId;
               _channelToRoom[channel] = userRoom.code;
               _broadcastGameState(userRoom.code);
-              if (userRoom.engine.currentPlayer.id == clientId && userRoom.engine.phase != GamePhase.idle) {
+              if (userRoom.engine.currentPlayer.id == clientId &&
+                  userRoom.engine.phase != GamePhase.idle) {
                 userRoom.startTimer(() => _handleTimeout(userRoom!.code));
               }
             } else {
-              _sendError(channel, 'No se encontró una partida activa para este ID.');
+              _sendError(channel, 'No se encontró una partida activa para este ID.',
+                  code: 'MATCH_NOT_FOUND');
             }
             return;
           }
@@ -218,15 +351,70 @@ Future<Response> onRequest(RequestContext context) async {
                 'reason': reason,
                 'timestamp': data['timestamp'] ?? DateTime.now().toIso8601String(),
               });
-              channel.sink.add(jsonEncode({'event': 'report_received', 'data': {'message': 'Reporte registrado.'}}));
+              channel.sink.add(jsonEncode(
+                  {'event': 'report_received', 'data': {'message': 'Reporte registrado.'}}));
             }
             return;
           }
 
           if (eventName == 'delete_user_data') {
             _userDatabase.remove(data['playerId'] ?? clientId);
-            channel.sink.add(jsonEncode({'event': 'user_data_deleted', 'data': {'message': 'Datos eliminados.'}}));
+            channel.sink.add(jsonEncode(
+                {'event': 'user_data_deleted', 'data': {'message': 'Datos eliminados.'}}));
             return;
+          }
+
+          // --- register_session: called on lobby entry to enforce single-device-per-account ---
+          if (eventName == 'register_session') {
+            final uid = await getUidFromToken(idToken);
+            if (uid != null) {
+              final existingClientId = _uidSessions[uid];
+              if (existingClientId != null && existingClientId != clientId) {
+                _sendError(channel,
+                    'Hay otro dispositivo conectado a esta cuenta.',
+                    code: 'SESSION_CONFLICT');
+                return;
+              }
+              _uidSessions[uid] = clientId;
+            }
+            return;
+          }
+
+          if (eventName == 'find_match' || eventName == 'create_game' || eventName == 'join_game') {
+            final uid = await getUidFromToken(idToken);
+            if (uid != null) {
+              // Single-session enforcement: reject second device.
+              final existingClientId = _uidSessions[uid];
+              if (existingClientId != null && existingClientId != clientId) {
+                _sendError(channel,
+                    'Hay otro dispositivo conectado a esta cuenta.',
+                    code: 'SESSION_CONFLICT');
+                return;
+              }
+              // Register this device as the active session for this account.
+              _uidSessions[uid] = clientId;
+
+              // Block if already in a room.
+              if (_activeUids.containsKey(uid)) {
+                final roomCode = _activeUids[uid];
+                final roomStillActive = roomCode != '__pending__' &&
+                    _rooms.containsKey(roomCode) &&
+                    _rooms[roomCode]!.playerUids.values.contains(uid);
+                if (roomStillActive) {
+                  channel.sink.add(jsonEncode({
+                    'event': 'error',
+                    'data': {
+                      'code': 'ALREADY_IN_GAME',
+                      'message': 'Ya estás en una partida activa.',
+                      'roomCode': roomCode,
+                    },
+                  }));
+                  return;
+                }
+                _activeUids.remove(uid);
+              }
+              _activeUids[uid] = '__pending__';
+            }
           }
 
           if (eventName == 'find_match') {
@@ -240,14 +428,15 @@ Future<Response> onRequest(RequestContext context) async {
               if (room.isPublic &&
                   room.maxPlayers == targetMaxPlayers &&
                   room.engine.players.length < room.maxPlayers &&
-                  room.engine.phase == GamePhase.idle) {
+                  room.engine.phase == GamePhase.idle &&
+                  room.clients.length == room.engine.players.length) {
                 foundRoom = room;
                 break;
               }
             }
             if (foundRoom != null) {
-              _joinToRoom(channel, foundRoom, clientId,
-                  data['name'] as String?, level, avatarType, avatarIconId,);
+              _joinToRoom(channel, foundRoom, clientId, data['name'] as String?,
+                  level, avatarType, avatarIconId, idToken);
             } else {
               _sendError(channel, 'No hay salas.', code: 'MATCH_NOT_FOUND');
             }
@@ -263,7 +452,8 @@ Future<Response> onRequest(RequestContext context) async {
               channel, clientId, data['name'] as String?,
               (data['maxPlayers'] as int?) ?? 2,
               (data['isPublic'] as bool?) ?? false,
-              level, avatarType, avatarIconId,
+              level, avatarType, avatarIconId, idToken,
+              testMode: (data['testMode'] as bool?) ?? false,
             );
           }
 
@@ -274,8 +464,8 @@ Future<Response> onRequest(RequestContext context) async {
             }
             final room = _rooms[data['roomCode'] ?? ''];
             if (room != null) {
-              _joinToRoom(channel, room, clientId,
-                  data['name'] as String?, level, avatarType, avatarIconId,);
+              _joinToRoom(channel, room, clientId, data['name'] as String?,
+                  level, avatarType, avatarIconId, idToken);
             } else {
               _sendError(channel, 'La sala no existe.');
             }
@@ -303,11 +493,18 @@ Future<Response> onRequest(RequestContext context) async {
             if (roomCode != null) {
               final room = _rooms[roomCode];
               if (room != null) {
-                final player = room.engine.players.firstWhere((p) => p.id == clientId, orElse: () => Player(id: '', name: ''));
+                final player = room.engine.players.firstWhere(
+                  (p) => p.id == clientId,
+                  orElse: () => Player(id: '', name: ''),
+                );
                 if (player.id.isNotEmpty) {
                   room.broadcast({
                     'event': 'chat',
-                    'data': {'sender': player.name, 'senderId': clientId, 'message': data['message']},
+                    'data': {
+                      'sender': player.name,
+                      'senderId': clientId,
+                      'message': data['message'],
+                    },
                   });
                 }
               }
@@ -332,7 +529,44 @@ Future<Response> onRequest(RequestContext context) async {
             return;
           }
 
-          // --- Winner leaving voluntarily after winning ---
+          // --- surrender: voluntary exit mid-game (counts as loss) ---
+          if (eventName == 'surrender') {
+            final roomCode = _channelToRoom[channel];
+            if (roomCode == null) return;
+            final room = _rooms[roomCode];
+            if (room == null) return;
+
+            final player = room.engine.players.firstWhere(
+              (p) => p.id == clientId,
+              orElse: () => Player(id: '', name: ''),
+            );
+            if (player.id.isEmpty || player.isFinished) return;
+
+            // Clear active_match_id immediately.
+            final uid = room.playerUids.remove(player.id);
+            if (uid != null) unawaited(_clearActiveMatch(uid));
+
+            // Confirm surrender to the leaving player.
+            channel.sink.add(jsonEncode({'event': 'surrendered', 'data': {}}));
+
+            // Notify remaining players.
+            room.broadcast({
+              'event': 'player_surrendered',
+              'data': {'playerId': clientId, 'playerName': player.name},
+            });
+
+            // Convert to AI so the game continues.
+            player.isAI = true;
+            player.isConnected = false;
+            room.clients.remove(clientId);
+            _channelToPlayer.remove(channel);
+            _channelToRoom.remove(channel);
+
+            _broadcastGameState(roomCode);
+            return;
+          }
+
+          // --- leave_match: winner leaves after finishing ---
           if (eventName == 'leave_match') {
             final roomCode = _channelToRoom[channel];
             if (roomCode != null) {
@@ -346,7 +580,7 @@ Future<Response> onRequest(RequestContext context) async {
                   room.clients.remove(clientId);
                   _channelToPlayer.remove(channel);
                   _channelToRoom.remove(channel);
-                  _broadcastInfo(roomCode, '${player.name} won and left the match.');
+                  _broadcastInfo(roomCode, '${player.name} terminó y salió de la partida.');
                   _broadcastGameState(roomCode);
                 }
               }
@@ -354,18 +588,22 @@ Future<Response> onRequest(RequestContext context) async {
             return;
           }
 
-          // --- REQUERIMIENTO AFK: toggle_auto_play ---
+          // --- toggle_auto_play ---
           if (eventName == 'toggle_auto_play') {
             final value = data['value'] as bool? ?? false;
             final roomCode = _channelToRoom[channel];
             if (roomCode != null) {
               final room = _rooms[roomCode];
               if (room != null) {
-                final player = room.engine.players.firstWhere((p) => p.id == clientId, orElse: () => Player(id: '', name: ''));
+                final player = room.engine.players.firstWhere(
+                  (p) => p.id == clientId,
+                  orElse: () => Player(id: '', name: ''),
+                );
                 if (player.id.isNotEmpty) {
                   player.isAutoPlaying = value;
                   _broadcastGameState(roomCode);
-                  if (room.engine.currentPlayer.id == clientId && room.engine.phase != GamePhase.idle) {
+                  if (room.engine.currentPlayer.id == clientId &&
+                      room.engine.phase != GamePhase.idle) {
                     room.startTimer(() => _handleTimeout(roomCode));
                   }
                 }
@@ -373,7 +611,6 @@ Future<Response> onRequest(RequestContext context) async {
             }
             return;
           }
-
         } catch (e) { /* Error silencioso */ }
       },
       onDone: handleDisconnect,
@@ -387,7 +624,8 @@ Future<Response> onRequest(RequestContext context) async {
 
 void _updatePlayerLevel(String clientId, int level) {
   for (final room in _rooms.values) {
-    final player = room.engine.players.firstWhere((p) => p.id == clientId, orElse: () => Player(id: '', name: ''));
+    final player = room.engine.players
+        .firstWhere((p) => p.id == clientId, orElse: () => Player(id: '', name: ''));
     if (player.id.isNotEmpty) {
       player.level = level;
       break;
@@ -397,45 +635,90 @@ void _updatePlayerLevel(String clientId, int level) {
 
 // --- Funciones de Gestión de Salas ---
 
-void _createAndJoinRoom(WebSocketChannel channel, String clientId, String? name, int maxPlayers, bool isPublic, int level, String avatarType, String? avatarIconId) {
-  final roomCode = (DateTime.now().millisecondsSinceEpoch % 100000).toString().padLeft(5, '0');
-  final board = generateBoard(classicActionPositions, classicActions);
+void _createAndJoinRoom(
+  WebSocketChannel channel,
+  String clientId,
+  String? name,
+  int maxPlayers,
+  bool isPublic,
+  int level,
+  String avatarType,
+  String? avatarIconId,
+  String? idToken, {
+  bool testMode = false,
+}) {
+  final roomCode =
+      (DateTime.now().millisecondsSinceEpoch % 100000).toString().padLeft(5, '0');
+  final board = generateBoard(classicActionPositions, classicActions, totalCells: 100);
   final engine = GameEngine(board: board, players: []);
-  final room = GameRoom(roomCode, engine, maxPlayers, isPublic: isPublic);
+  final room = GameRoom(roomCode, engine, maxPlayers, isPublic: isPublic, testMode: testMode);
   _rooms[roomCode] = room;
-  final newPlayer = Player(id: clientId, name: name ?? 'Anfitrión', level: level, avatarType: avatarType, avatarIconId: avatarIconId);
+
+  final newPlayer = Player(
+    id: clientId,
+    name: name ?? 'Anfitrión',
+    level: level,
+    avatarType: avatarType,
+    avatarIconId: avatarIconId,
+  );
   room.engine.players.add(newPlayer);
   room.clients[clientId] = channel;
   _channelToPlayer[channel] = clientId;
   _channelToRoom[channel] = roomCode;
 
+  unawaited(_storeUidAndSetActiveMatch(room, clientId, idToken, roomCode));
+
   if (room.engine.players.length == room.maxPlayers) {
     room.engine.phase = GamePhase.rolling;
+    if (room.testMode) _applyTestMode(room);
   }
 
   channel.sink.add(jsonEncode({'event': 'game_created', 'data': {'roomCode': roomCode}}));
   _broadcastGameState(roomCode);
-  _broadcastInfo(roomCode, '¡ATENCIÓN! El servidor está en MODO PRUEBA con un tablero de 10 casillas.');
 
   if (room.engine.phase == GamePhase.rolling) {
     room.startTimer(() => _handleTimeout(roomCode));
   }
 }
 
-void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, String? name, int level, String avatarType, String? avatarIconId) {
+void _joinToRoom(
+  WebSocketChannel channel,
+  GameRoom room,
+  String clientId,
+  String? name,
+  int level,
+  String avatarType,
+  String? avatarIconId,
+  String? idToken,
+) {
   final existingPlayerIndex = room.engine.players.indexWhere((p) => p.id == clientId);
   if (existingPlayerIndex != -1) {
+    final player = room.engine.players[existingPlayerIndex];
+    // Surrendered or grace-period-expired → permanently AI. Block rejoin.
+    if (player.isAI) {
+      _sendError(channel, 'No puedes unirte a esta partida.', code: 'CANNOT_REJOIN');
+      return;
+    }
+    // Reconnection path — cancel grace timer and restore player.
     _reconnectionTimers[clientId]?.cancel();
     _reconnectionTimers.remove(clientId);
-    final player = room.engine.players[existingPlayerIndex];
     player.isAI = false;
     player.isConnected = true;
     player.level = level;
     player.avatarType = avatarType;
     player.avatarIconId = avatarIconId;
+    // Evict old channel (device switch — Scenario 5).
+    final oldChannel = room.clients[clientId];
+    if (oldChannel != null && oldChannel != channel) {
+      _channelToPlayer.remove(oldChannel);
+      _channelToRoom.remove(oldChannel);
+      try { oldChannel.sink.close(); } catch (_) {}
+    }
     room.clients[clientId] = channel;
     _channelToPlayer[channel] = clientId;
     _channelToRoom[channel] = room.code;
+    // Refresh UID in case it was missing (e.g. server restart).
+    unawaited(_storeUidAndSetActiveMatch(room, clientId, idToken, room.code));
     channel.sink.add(jsonEncode({'event': 'game_joined', 'data': {'reconnected': true}}));
     _broadcastGameState(room.code);
     if (room.engine.currentPlayer.id == clientId && room.engine.phase != GamePhase.idle) {
@@ -443,23 +726,35 @@ void _joinToRoom(WebSocketChannel channel, GameRoom room, String clientId, Strin
     }
     return;
   }
+
   if (room.engine.phase != GamePhase.idle || room.engine.players.length >= room.maxPlayers) {
-    _sendError(channel, 'Sala no disponible.'); return;
+    _sendError(channel, 'Sala no disponible.');
+    return;
   }
 
-  final newPlayer = Player(id: clientId, name: name ?? 'Jugador ${room.engine.players.length + 1}', level: level, avatarType: avatarType, avatarIconId: avatarIconId);
+  final newPlayer = Player(
+    id: clientId,
+    name: name ?? 'Jugador ${room.engine.players.length + 1}',
+    level: level,
+    avatarType: avatarType,
+    avatarIconId: avatarIconId,
+  );
   room.engine.players.add(newPlayer);
   room.clients[clientId] = channel;
   _channelToPlayer[channel] = clientId;
   _channelToRoom[channel] = room.code;
 
+  unawaited(_storeUidAndSetActiveMatch(room, clientId, idToken, room.code));
+
   var gameJustStarted = false;
   if (room.engine.players.length == room.maxPlayers) {
     room.engine.phase = GamePhase.rolling;
     gameJustStarted = true;
+    if (room.testMode) _applyTestMode(room);
   }
 
-  channel.sink.add(jsonEncode({'event': 'game_joined', 'data': {'playerCount': room.engine.players.length}}));
+  channel.sink.add(
+      jsonEncode({'event': 'game_joined', 'data': {'playerCount': room.engine.players.length}}));
   _broadcastGameState(room.code);
 
   if (gameJustStarted) {
@@ -478,12 +773,12 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
   if (room != null) {
     if (room.engine.currentPlayer.id != pId) return;
     room.stopTimer();
-    
+
     final diceValue = room.engine.rollDice();
     room.engine.currentPlayer.lastDiceValue = diceValue;
-    
+
     _broadcastDiceResult(rCode, diceValue, pId);
-    
+
     room.engine.registerSix(room.engine.currentPlayer, diceValue);
     if (room.engine.currentPlayer.consecutiveSixes >= 3) {
       room.engine.penaltyThreeSixes(room.engine.currentPlayer);
@@ -494,7 +789,6 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
       _broadcastGameState(rCode);
       room.startTimer(() => _handleTimeout(rCode));
     } else {
-      // Cancel extra turn from registerSix — no move possible, turn forfeits
       if (diceValue == 6 && room.engine.currentPlayer.extraTurns > 0) {
         room.engine.currentPlayer.extraTurns--;
       }
@@ -503,15 +797,20 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
   }
 }
 
-void _handleMoveToken(WebSocketChannel? channel, int tokenId, {String? roomCode, String? playerId}) {
+void _handleMoveToken(WebSocketChannel? channel, int tokenId,
+    {String? roomCode, String? playerId}) {
   final rCode = roomCode ?? (channel != null ? _channelToRoom[channel] : null);
   final pId = playerId ?? (channel != null ? _channelToPlayer[channel] : null);
   if (rCode == null || pId == null) return;
   final room = _rooms[rCode];
   if (room == null) return;
   room.stopTimer();
-  final token = room.engine.currentPlayer.tokens.firstWhere((t) => t.id == tokenId);
-  if (!room.engine.canMove(token, room.engine.lastDiceValue)) { room.startTimer(() => _handleTimeout(rCode)); return; }
+  final token =
+      room.engine.currentPlayer.tokens.firstWhere((t) => t.id == tokenId);
+  if (!room.engine.canMove(token, room.engine.lastDiceValue)) {
+    room.startTimer(() => _handleTimeout(rCode));
+    return;
+  }
   room.engine.phase = GamePhase.moving;
   _broadcastGameState(rCode);
   Timer(const Duration(milliseconds: 500), () {
@@ -519,18 +818,32 @@ void _handleMoveToken(WebSocketChannel? channel, int tokenId, {String? roomCode,
     for (var i = 0; i < diceValue; i++) {
       room.engine.stepForward(token);
     }
+    // Capture action before applying it (position may change after).
+    BoardAction? cellAction;
+    if (!token.isFinished && token.position > 0) {
+      cellAction = room.engine.board.getCell(token.position).action;
+    }
     room.engine.applyCellAction(room.engine.currentPlayer, token);
+    if (cellAction != null) {
+      _broadcastCellActionEvent(rCode, room.engine.currentPlayer, token, cellAction);
+    }
     if (room.engine.resolveCollisions(token)) room.engine.currentPlayer.extraTurns++;
     if (token.isFinished) room.engine.currentPlayer.extraTurns++;
-    if (room.engine.currentPlayer.isFinished) { room.engine.currentPlayer.extraTurns = 0; _moveToNextTurnWithSkips(rCode); }
-    else if (room.engine.currentPlayer.extraTurns > 0 || diceValue == 6) {
-      if (room.engine.currentPlayer.extraTurns > 0) room.engine.currentPlayer.extraTurns--;
-      room.engine.phase = GamePhase.rolling; _broadcastGameState(rCode); room.startTimer(() => _handleTimeout(rCode));
+
+    if (room.engine.currentPlayer.isFinished) {
+      // Notify this player of their finish position and clear their active_match_id.
+      _notifyAndClearPlayerFinish(rCode, room.engine.currentPlayer);
+      room.engine.currentPlayer.extraTurns = 0;
+      _moveToNextTurnWithSkips(rCode);
+    } else if (room.engine.currentPlayer.extraTurns > 0 || diceValue == 6) {
+      if (room.engine.currentPlayer.extraTurns > 0) {
+        room.engine.currentPlayer.extraTurns--;
+      }
+      room.engine.phase = GamePhase.rolling;
+      _broadcastGameState(rCode);
+      room.startTimer(() => _handleTimeout(rCode));
     } else {
       _moveToNextTurnWithSkips(rCode);
-    }
-    if (room.engine.phase == GamePhase.finished) {
-      Timer(const Duration(seconds: 10), () => _rooms.remove(rCode));
     }
   });
 }
@@ -539,7 +852,6 @@ void _handleTimeout(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
 
-  // REQUERIMIENTO AFK: Si el timer llega a 0 sin acción (no es IA y no estaba en autoplay), activamos autoplay
   final currentPlayer = room.engine.currentPlayer;
   if (!currentPlayer.isAI && !currentPlayer.isAutoPlaying) {
     currentPlayer.isAutoPlaying = true;
@@ -550,12 +862,17 @@ void _handleTimeout(String roomCode) {
   if (room.engine.phase == GamePhase.rolling) {
     _handleRollDice(null, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
   } else if (room.engine.phase == GamePhase.choosingToken) {
-    Token? best; var max = -1;
+    Token? best;
+    var max = -1;
     for (final t in room.engine.currentPlayer.tokens) {
-      if (room.engine.canMove(t, room.engine.lastDiceValue) && t.position > max) { max = t.position; best = t; }
+      if (room.engine.canMove(t, room.engine.lastDiceValue) && t.position > max) {
+        max = t.position;
+        best = t;
+      }
     }
     if (best != null) {
-      _handleMoveToken(null, best.id, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
+      _handleMoveToken(null, best.id,
+          roomCode: roomCode, playerId: room.engine.currentPlayer.id);
     } else {
       _moveToNextTurnWithSkips(roomCode);
     }
@@ -570,46 +887,115 @@ void _moveToNextTurnWithSkips(String roomCode) {
   do {
     room.engine.nextTurn();
     if (room.engine.phase == GamePhase.finished) break;
-    if (room.engine.currentPlayer.mustSkipTurn) { room.engine.currentPlayer.consumeSkip(); skip = true; }
-    else {
+    if (room.engine.currentPlayer.mustSkipTurn) {
+      room.engine.currentPlayer.consumeSkip();
+      skip = true;
+    } else {
       skip = false;
     }
   } while (skip);
+
   _broadcastGameState(roomCode);
-  if (room.engine.phase != GamePhase.finished) room.startTimer(() => _handleTimeout(roomCode));
+
+  if (room.engine.phase == GamePhase.finished) {
+    // Notify any remaining players who haven't received you_finished yet
+    // (e.g. the last player who was force-finished by nextTurn).
+    for (final p in room.engine.finishedPlayers) {
+      if (room.playerUids.containsKey(p.id)) {
+        _notifyAndClearPlayerFinish(roomCode, p);
+      }
+    }
+    // Keep room alive for 60 s so spectators can see the final board.
+    Timer(const Duration(seconds: 60), () => _rooms.remove(roomCode)?.stopAll());
+  } else {
+    room.startTimer(() => _handleTimeout(roomCode));
+  }
 }
 
-// --- Helpers ---
+// --- Helpers de broadcast ---
 
-void _broadcastGameEvent(String r, String m) => _rooms[r]?.broadcast({'event': 'game_event', 'data': {'message': m}});
-void _broadcastDiceResult(String r, int v, String p) => _rooms[r]?.broadcast({'event': 'dice_result', 'data': {'diceValue': v, 'playerId': p}});
-void _broadcastInfo(String r, String m) => _rooms[r]?.broadcast({'event': 'info', 'data': {'message': m}});
-void _sendError(WebSocketChannel c, String m, {String? code}) => c.sink.add(jsonEncode({'event': 'error', 'data': {'message': m, 'code': code}}));
+void _broadcastGameEvent(String r, String m) =>
+    _rooms[r]?.broadcast({'event': 'game_event', 'data': {'message': m}});
+
+void _broadcastCellActionEvent(String roomCode, Player player, Token token, BoardAction action) {
+  final room = _rooms[roomCode];
+  if (room == null) return;
+  String msgKey;
+  String type;
+  final Map<String, String> args = {'name': player.name};
+  switch (action.type) {
+    case BoardActionType.goToStart:
+      msgKey = 'cell_action_go_to_start';
+      type = 'penalty';
+    case BoardActionType.rollAgain:
+      msgKey = 'cell_action_roll_again';
+      type = 'bonus';
+    case BoardActionType.skipTurn:
+      msgKey = 'cell_action_skip_turn';
+      type = 'penalty';
+    case BoardActionType.moveTo:
+      msgKey = 'cell_action_move_to';
+      type = (action.targetNumber != null && !token.isFinished && action.targetNumber! > token.position) ? 'bonus' : 'penalty';
+      args['cell'] = token.isFinished ? '${room.engine.board.finalPosition}' : '${action.targetNumber}';
+  }
+  room.broadcast({
+    'event': 'game_event',
+    'data': {
+      'message': msgKey,
+      'playerId': player.id,
+      'type': type,
+      'args': args,
+    },
+  });
+}
+void _broadcastDiceResult(String r, int v, String p) =>
+    _rooms[r]?.broadcast({'event': 'dice_result', 'data': {'diceValue': v, 'playerId': p}});
+void _broadcastInfo(String r, String m) =>
+    _rooms[r]?.broadcast({'event': 'info', 'data': {'message': m}});
+void _sendError(WebSocketChannel c, String m, {String? code}) =>
+    c.sink.add(jsonEncode({'event': 'error', 'data': {'message': m, 'code': code}}));
 
 void _broadcastGameState(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
   var phaseStr = 'idle';
   switch (room.engine.phase) {
-    case GamePhase.idle: phaseStr = 'idle';
-    case GamePhase.rolling: phaseStr = 'rolling';
-    case GamePhase.choosingToken: phaseStr = 'choosing_token';
-    case GamePhase.moving: phaseStr = 'moving';
-    case GamePhase.finished: phaseStr = 'finished';
+    case GamePhase.idle:
+      phaseStr = 'idle';
+    case GamePhase.rolling:
+      phaseStr = 'rolling';
+    case GamePhase.choosingToken:
+      phaseStr = 'choosing_token';
+    case GamePhase.moving:
+      phaseStr = 'moving';
+    case GamePhase.finished:
+      phaseStr = 'finished';
   }
   room.broadcast({
     'event': 'game_state',
     'data': {
-      'roomCode': room.code, 
-      'timer': room.remainingSeconds, 
+      'roomCode': room.code,
+      'timer': room.remainingSeconds,
       'phase': phaseStr,
       'boardSize': room.engine.board.finalPosition,
+      'maxPlayers': room.maxPlayers,
       'winners': room.engine.finishedPlayers.map((p) => p.id).toList(),
       'players': room.engine.players.asMap().entries.map((e) {
-        final json = e.value.toJson(); json['index'] = e.key; return json;
+        final json = e.value.toJson();
+        json['index'] = e.key;
+        return json;
       }).toList(),
       'currentPlayerId': room.engine.currentPlayer.id,
       'lastDiceValue': room.engine.lastDiceValue,
     },
   });
+}
+
+void _applyTestMode(GameRoom room) {
+  final target = room.engine.board.finalPosition - 1;
+  for (final player in room.engine.players) {
+    for (final token in player.tokens) {
+      token.position = target;
+    }
+  }
 }
