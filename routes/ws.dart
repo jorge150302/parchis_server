@@ -28,6 +28,7 @@ class GameRoom {
   Timer? maxDurationTimer;
   Timer? zombieCleanupTimer;
   int remainingSeconds = 20;
+  int? forcedDice; // debug only: consumed on next roll
 
   void broadcast(Map<String, dynamic> event) {
     final message = jsonEncode(event);
@@ -58,7 +59,8 @@ class GameRoom {
     final currentPlayer = engine.currentPlayer;
 
     if (currentPlayer.isAI || currentPlayer.isAutoPlaying) {
-      turnTimer = Timer(const Duration(milliseconds: 6000), onTimeout);
+      final isChoosing = engine.phase == GamePhase.choosingToken;
+      turnTimer = Timer(Duration(milliseconds: isChoosing ? 400 : 1200), onTimeout);
       return;
     }
 
@@ -471,6 +473,15 @@ Future<Response> onRequest(RequestContext context) async {
             }
           }
 
+          if (eventName == 'debug_set_dice') {
+            final roomCode = _channelToRoom[channel];
+            final room = roomCode != null ? _rooms[roomCode] : null;
+            if (room != null && room.testMode) {
+              room.forcedDice = data['value'] as int?;
+            }
+            return;
+          }
+
           if (eventName == 'roll_dice') {
             _updatePlayerLevel(clientId, level);
             _handleRollDice(channel);
@@ -479,7 +490,7 @@ Future<Response> onRequest(RequestContext context) async {
           if (eventName == 'move_token') {
             _updatePlayerLevel(clientId, level);
             final tokenId = data['tokenId'] as int?;
-            if (tokenId != null) _handleMoveToken(channel, tokenId);
+            if (tokenId != null) unawaited(_handleMoveToken(channel, tokenId));
           }
 
           if (eventName == 'skip_turn') {
@@ -774,7 +785,9 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
     if (room.engine.currentPlayer.id != pId) return;
     room.stopTimer();
 
-    final diceValue = room.engine.rollDice();
+    final diceValue = (room.testMode && room.forcedDice != null)
+        ? () { final v = room.forcedDice!; room.forcedDice = null; return v; }()
+        : room.engine.rollDice();
     room.engine.currentPlayer.lastDiceValue = diceValue;
 
     _broadcastDiceResult(rCode, diceValue, pId);
@@ -789,16 +802,25 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
       _broadcastGameState(rCode);
       room.startTimer(() => _handleTimeout(rCode));
     } else {
-      if (diceValue == 6 && room.engine.currentPlayer.extraTurns > 0) {
-        room.engine.currentPlayer.extraTurns--;
+      if (diceValue == 6) {
+        room.broadcast({'event': 'game_event', 'data': {
+          'message': 'player_cant_move',
+          'playerId': room.engine.currentPlayer.id,
+          'type': 'penalty',
+          'args': {'name': room.engine.currentPlayer.name},
+        }});
+        room.engine.phase = GamePhase.rolling;
+        _broadcastGameState(rCode);
+        room.startTimer(() => _handleTimeout(rCode));
+      } else {
+        _moveToNextTurnWithSkips(rCode);
       }
-      _moveToNextTurnWithSkips(rCode);
     }
   }
 }
 
-void _handleMoveToken(WebSocketChannel? channel, int tokenId,
-    {String? roomCode, String? playerId}) {
+Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
+    {String? roomCode, String? playerId}) async {
   final rCode = roomCode ?? (channel != null ? _channelToRoom[channel] : null);
   final pId = playerId ?? (channel != null ? _channelToPlayer[channel] : null);
   if (rCode == null || pId == null) return;
@@ -813,39 +835,72 @@ void _handleMoveToken(WebSocketChannel? channel, int tokenId,
   }
   room.engine.phase = GamePhase.moving;
   _broadcastGameState(rCode);
-  Timer(const Duration(milliseconds: 500), () {
-    final diceValue = room.engine.lastDiceValue;
-    for (var i = 0; i < diceValue; i++) {
-      room.engine.stepForward(token);
-    }
-    // Capture action before applying it (position may change after).
-    BoardAction? cellAction;
-    if (!token.isFinished && token.position > 0) {
-      cellAction = room.engine.board.getCell(token.position).action;
-    }
+  await Future.delayed(const Duration(milliseconds: 300));
+
+  final diceValue = room.engine.lastDiceValue;
+  for (var i = 0; i < diceValue; i++) {
+    room.engine.stepForward(token);
+  }
+
+  // Broadcast intermediate position so clients can animate step-by-step.
+  if (!token.isFinished) {
+    room.broadcast({'event': 'token_stepped', 'data': {
+      'playerId': room.engine.currentPlayer.id,
+      'tokenId': tokenId,
+      'position': token.position,
+    }});
+  }
+
+  // Wait for step animation on clients (200ms per step + 300ms buffer).
+  await Future.delayed(Duration(milliseconds: diceValue * 200 + 300));
+
+  // Capture cell action before applying (position changes after apply).
+  BoardAction? cellAction;
+  if (!token.isFinished && token.position > 0) {
+    cellAction = room.engine.board.getCell(token.position).action;
+  }
+
+  // skipTurn + dice-6 exception: cancel both effects instead of applying either.
+  final bool skipTurnDice6 = cellAction?.type == BoardActionType.skipTurn && diceValue == 6;
+  if (!skipTurnDice6) {
     room.engine.applyCellAction(room.engine.currentPlayer, token);
     if (cellAction != null) {
       _broadcastCellActionEvent(rCode, room.engine.currentPlayer, token, cellAction);
     }
-    if (room.engine.resolveCollisions(token)) room.engine.currentPlayer.extraTurns++;
-    if (token.isFinished) room.engine.currentPlayer.extraTurns++;
+  }
 
-    if (room.engine.currentPlayer.isFinished) {
-      // Notify this player of their finish position and clear their active_match_id.
-      _notifyAndClearPlayerFinish(rCode, room.engine.currentPlayer);
-      room.engine.currentPlayer.extraTurns = 0;
-      _moveToNextTurnWithSkips(rCode);
-    } else if (room.engine.currentPlayer.extraTurns > 0 || diceValue == 6) {
-      if (room.engine.currentPlayer.extraTurns > 0) {
-        room.engine.currentPlayer.extraTurns--;
-      }
-      room.engine.phase = GamePhase.rolling;
-      _broadcastGameState(rCode);
-      room.startTimer(() => _handleTimeout(rCode));
-    } else {
-      _moveToNextTurnWithSkips(rCode);
+  final bool captured = room.engine.resolveCollisions(token);
+  if (captured) {
+    room.engine.currentPlayer.extraTurns++;
+    room.broadcast({'event': 'game_event', 'data': {
+      'message': 'captured_player',
+      'playerId': room.engine.currentPlayer.id,
+      'type': 'bonus',
+      'args': {'name': room.engine.currentPlayer.name},
+    }});
+  }
+  if (token.isFinished) room.engine.currentPlayer.extraTurns++;
+
+  if (room.engine.currentPlayer.isFinished) {
+    _notifyAndClearPlayerFinish(rCode, room.engine.currentPlayer);
+    room.engine.currentPlayer.extraTurns = 0;
+    _moveToNextTurnWithSkips(rCode);
+  } else if (room.engine.currentPlayer.extraTurns > 0 || (diceValue == 6 && !skipTurnDice6)) {
+    if (room.engine.currentPlayer.extraTurns > 0) {
+      room.engine.currentPlayer.extraTurns--;
     }
-  });
+    room.broadcast({'event': 'game_event', 'data': {
+      'message': 'extra_turn',
+      'playerId': room.engine.currentPlayer.id,
+      'type': 'bonus',
+      'args': {'name': room.engine.currentPlayer.name},
+    }});
+    room.engine.phase = GamePhase.rolling;
+    _broadcastGameState(rCode);
+    room.startTimer(() => _handleTimeout(rCode));
+  } else {
+    _moveToNextTurnWithSkips(rCode);
+  }
 }
 
 void _handleTimeout(String roomCode) {
@@ -871,8 +926,8 @@ void _handleTimeout(String roomCode) {
       }
     }
     if (best != null) {
-      _handleMoveToken(null, best.id,
-          roomCode: roomCode, playerId: room.engine.currentPlayer.id);
+      unawaited(_handleMoveToken(null, best.id,
+          roomCode: roomCode, playerId: room.engine.currentPlayer.id));
     } else {
       _moveToNextTurnWithSkips(roomCode);
     }
@@ -888,7 +943,14 @@ void _moveToNextTurnWithSkips(String roomCode) {
     room.engine.nextTurn();
     if (room.engine.phase == GamePhase.finished) break;
     if (room.engine.currentPlayer.mustSkipTurn) {
-      room.engine.currentPlayer.consumeSkip();
+      final skipped = room.engine.currentPlayer;
+      skipped.consumeSkip();
+      room.broadcast({'event': 'game_event', 'data': {
+        'message': 'skip_turn_msg',
+        'playerId': skipped.id,
+        'type': 'penalty',
+        'args': {'name': skipped.name},
+      }});
       skip = true;
     } else {
       skip = false;
@@ -925,7 +987,7 @@ void _broadcastCellActionEvent(String roomCode, Player player, Token token, Boar
   final Map<String, String> args = {'name': player.name};
   switch (action.type) {
     case BoardActionType.goToStart:
-      msgKey = 'cell_action_go_to_start';
+      msgKey = 'bad_luck_home';
       type = 'penalty';
     case BoardActionType.rollAgain:
       msgKey = 'cell_action_roll_again';
