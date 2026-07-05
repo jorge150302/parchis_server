@@ -59,8 +59,7 @@ class GameRoom {
     final currentPlayer = engine.currentPlayer;
 
     if (currentPlayer.isAI || currentPlayer.isAutoPlaying) {
-      final isChoosing = engine.phase == GamePhase.choosingToken;
-      turnTimer = Timer(Duration(milliseconds: isChoosing ? 400 : 1200), onTimeout);
+      turnTimer = Timer(const Duration(seconds: 3), onTimeout);
       return;
     }
 
