@@ -23,6 +23,7 @@ class GameRoom {
   final bool testMode;
   final Map<String, WebSocketChannel> clients = {}; // clientId → channel
   final Map<String, String> playerUids = {};        // clientId → Firebase UID
+  bool hadMultipleHumans = false;
 
   Timer? turnTimer;
   Timer? maxDurationTimer;
@@ -146,6 +147,7 @@ Future<void> _storeUidAndSetActiveMatch(
   final uid = await getUidFromToken(idToken);
   if (uid == null) return;
   room.playerUids[clientId] = uid;
+  if (room.playerUids.length > 1) room.hadMultipleHumans = true;
   _activeUids[uid] = roomCode; // update from __pending__ to real room code
   await _setActiveMatch(uid, roomCode);
 }
@@ -153,7 +155,7 @@ Future<void> _storeUidAndSetActiveMatch(
 /// Sends `you_finished` to the player's channel and clears their active_match_id.
 /// Safe to call multiple times — removes the UID on first call so subsequent
 /// calls are no-ops.
-void _notifyAndClearPlayerFinish(String roomCode, Player player) {
+void _notifyAndClearPlayerFinish(String roomCode, Player player, {bool silent = false, String? reason}) {
   final room = _rooms[roomCode];
   if (room == null) return;
   final rank = room.engine.finishedPlayers.indexOf(player) + 1;
@@ -163,10 +165,62 @@ void _notifyAndClearPlayerFinish(String roomCode, Player player) {
     'data': {
       'position': rank,
       'totalPlayers': room.engine.players.length,
+      'silent': silent,
+      'reason': reason,
     },
   }));
   final uid = room.playerUids.remove(player.id);
   if (uid != null) unawaited(_clearActiveMatch(uid));
+}
+
+/// Closes and removes a room if no human players remain (all AI or finished).
+void _checkAndCleanupRoom(String roomCode) {
+  final room = _rooms[roomCode];
+  if (room == null) return;
+
+  // Don't kill if the game is already in the final spectator window.
+  if (room.engine.phase == GamePhase.finished) return;
+
+  final humansRemaining = room.playerUids.keys.toList();
+
+  // Last human standing victory: if only one human remains in a match that started with multiple,
+  // and that human hasn't finished yet, award them the win automatically.
+  if (humansRemaining.length == 1 && room.hadMultipleHumans) {
+    final lastPlayerId = humansRemaining.first;
+    final player = room.engine.players.firstWhere((p) => p.id == lastPlayerId);
+    
+    if (!player.isFinished) {
+      // Mark as winner silently on the server state
+      for (final t in player.tokens) {
+        t.position = -1;
+        t.isFinished = true;
+      }
+      
+      // Ensure they are in the winners list for correct rank and state
+      if (!room.engine.finisherIds.contains(player.id)) {
+        room.engine.finisherIds.add(player.id);
+      }
+      
+      _notifyAndClearPlayerFinish(roomCode, player, silent: true, reason: 'abandonment');
+      room.engine.phase = GamePhase.finished;
+      _broadcastGameState(roomCode);
+      
+      // Schedule cleanup
+      Timer(const Duration(seconds: 30), () => _rooms.remove(roomCode)?.stopAll());
+      return;
+    }
+  }
+
+  if (humansRemaining.isEmpty) {
+    final orphanRoom = _rooms.remove(roomCode);
+    if (orphanRoom != null) {
+      for (final uid in orphanRoom.playerUids.values) {
+        unawaited(_clearActiveMatch(uid));
+      }
+      orphanRoom.playerUids.clear();
+      orphanRoom.stopAll();
+    }
+  }
 }
 
 // --- WebSocket handler ---
@@ -220,16 +274,15 @@ Future<Response> onRequest(RequestContext context) async {
             if (p.id.isNotEmpty) {
               p.isAI = true;
               _broadcastGameState(roomCode);
-              _broadcastInfo(roomCode, '${p.name} abandonó la partida definitivamente.');
               // Clear active_match_id and count the abandoned match.
               final uid = room.playerUids.remove(playerId);
               if (uid != null) unawaited(_recordMatchAbandoned(uid));
+              _checkAndCleanupRoom(roomCode);
             }
             _reconnectionTimers.remove(playerId);
           });
 
           room.clients.remove(playerId);
-          _broadcastInfo(roomCode, '$playerId se ha desconectado. Esperando reconexión (90 s)...');
 
           // Zombie cleanup — remove room if all clients drop for 5 min.
           if (room.clients.isEmpty) {
@@ -559,12 +612,6 @@ Future<Response> onRequest(RequestContext context) async {
             // Confirm surrender to the leaving player.
             channel.sink.add(jsonEncode({'event': 'surrendered', 'data': {}}));
 
-            // Notify remaining players.
-            room.broadcast({
-              'event': 'player_surrendered',
-              'data': {'playerId': clientId, 'playerName': player.name},
-            });
-
             // Convert to AI so the game continues.
             player.isAI = true;
             player.isConnected = false;
@@ -573,6 +620,7 @@ Future<Response> onRequest(RequestContext context) async {
             _channelToRoom.remove(channel);
 
             _broadcastGameState(roomCode);
+            _checkAndCleanupRoom(roomCode);
             return;
           }
 
@@ -590,8 +638,8 @@ Future<Response> onRequest(RequestContext context) async {
                   room.clients.remove(clientId);
                   _channelToPlayer.remove(channel);
                   _channelToRoom.remove(channel);
-                  _broadcastInfo(roomCode, '${player.name} terminó y salió de la partida.');
                   _broadcastGameState(roomCode);
+                  _checkAndCleanupRoom(roomCode);
                 }
               }
             }
@@ -909,7 +957,6 @@ void _handleTimeout(String roomCode) {
   final currentPlayer = room.engine.currentPlayer;
   if (!currentPlayer.isAI && !currentPlayer.isAutoPlaying) {
     currentPlayer.isAutoPlaying = true;
-    _broadcastInfo(roomCode, '${currentPlayer.name} ha entrado en modo automático por inactividad.');
     _broadcastGameState(roomCode);
   }
 
