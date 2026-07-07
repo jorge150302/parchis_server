@@ -197,8 +197,8 @@ void _checkAndCleanupRoom(String roomCode) {
       }
       
       // Ensure they are in the winners list for correct rank and state
-      if (!room.engine.finisherIds.contains(player.id)) {
-        room.engine.finisherIds.add(player.id);
+      if (!room.engine.finishedPlayers.contains(player)) {
+        room.engine.finishedPlayers.add(player);
       }
       
       _notifyAndClearPlayerFinish(roomCode, player, silent: true, reason: 'abandonment');
