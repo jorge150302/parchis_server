@@ -492,7 +492,13 @@ Future<Response> onRequest(RequestContext context) async {
               _joinToRoom(channel, foundRoom, clientId, data['name'] as String?,
                   level, avatarType, avatarIconId, idToken);
             } else {
-              _sendError(channel, 'No hay salas.', code: 'MATCH_NOT_FOUND');
+              // Si no hay salas, creamos una pública automáticamente para esperar a otros
+              _createAndJoinRoom(
+                channel, clientId, data['name'] as String?,
+                targetMaxPlayers,
+                true, // isPublic
+                level, avatarType, avatarIconId, idToken,
+              );
             }
             return;
           }
@@ -812,7 +818,11 @@ void _joinToRoom(
   }
 
   channel.sink.add(
-      jsonEncode({'event': 'game_joined', 'data': {'playerCount': room.engine.players.length}}));
+      jsonEncode({'event': 'game_joined', 'data': {
+        'roomCode': room.code,
+        'playerCount': room.engine.players.length,
+        'maxPlayers': room.maxPlayers,
+      }}));
   _broadcastGameState(room.code);
 
   if (gameJustStarted) {
@@ -833,7 +843,12 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
     room.stopTimer();
 
     final diceValue = (room.testMode && room.forcedDice != null)
-        ? () { final v = room.forcedDice!; room.forcedDice = null; return v; }()
+        ? () { 
+            final v = room.forcedDice!; 
+            room.forcedDice = null; 
+            room.engine.lastDiceValue = v; // ✅ Sincronizar con el engine
+            return v; 
+          }()
         : room.engine.rollDice();
     room.engine.currentPlayer.lastDiceValue = diceValue;
 
@@ -918,7 +933,7 @@ Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
 
   final bool captured = room.engine.resolveCollisions(token);
   if (captured) {
-    room.engine.currentPlayer.extraTurns++;
+    // room.engine.currentPlayer.extraTurns++ ya se hace en resolveCollisions del motor
     room.broadcast({'event': 'game_event', 'data': {
       'message': 'captured_player',
       'playerId': room.engine.currentPlayer.id,
@@ -926,16 +941,18 @@ Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
       'args': {'name': room.engine.currentPlayer.name},
     }});
   }
-  if (token.isFinished) room.engine.currentPlayer.extraTurns++;
+
+  // Si sacó un 6 y no cayó en casilla de saltar turno, gana un turno extra natural
+  if (diceValue == 6 && !skipTurnDice6) {
+    room.engine.currentPlayer.extraTurns++;
+  }
 
   if (room.engine.currentPlayer.isFinished) {
     _notifyAndClearPlayerFinish(rCode, room.engine.currentPlayer);
     room.engine.currentPlayer.extraTurns = 0;
     _moveToNextTurnWithSkips(rCode);
-  } else if (room.engine.currentPlayer.extraTurns > 0 || (diceValue == 6 && !skipTurnDice6)) {
-    if (room.engine.currentPlayer.extraTurns > 0) {
-      room.engine.currentPlayer.extraTurns--;
-    }
+  } else if (room.engine.currentPlayer.extraTurns > 0) {
+    room.engine.currentPlayer.extraTurns--;
     room.broadcast({'event': 'game_event', 'data': {
       'message': 'extra_turn',
       'playerId': room.engine.currentPlayer.id,
@@ -984,6 +1001,18 @@ void _moveToNextTurnWithSkips(String roomCode) {
   final room = _rooms[roomCode];
   if (room == null) return;
   room.stopTimer();
+
+  // --- Compensación Silenciosa de Penalizaciones ---
+  // Si TODOS los jugadores activos tienen al menos un salto de turno pendiente,
+  // les restamos uno a todos silenciosamente para evitar ráfagas de mensajes 
+  // y permitir que el juego fluya si todos están en la misma situación.
+  final activePlayers = room.engine.players.where((p) => !p.isFinished).toList();
+  if (activePlayers.isNotEmpty && activePlayers.every((p) => p.mustSkipTurn)) {
+    for (final p in activePlayers) {
+      p.consumeSkip();
+    }
+  }
+
   bool skip;
   do {
     room.engine.nextTurn();

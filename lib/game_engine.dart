@@ -69,6 +69,7 @@ class GameEngine {
 
   void penaltyThreeSixes(Player player) {
     player.resetToStart();
+    player.extraTurns = 0; // Se pierden los turnos acumulados por penalización
   }
 
   /// Verifica si una casilla tiene un puente.
@@ -176,6 +177,10 @@ class GameEngine {
         if (otherToken.position == token.position) {
           otherToken.reset();
           sentHome = true;
+          // El bono de captura se suma al contador
+          if (!currentPlayer.isFinished) {
+            currentPlayer.extraTurns++;
+          }
         }
       }
     }

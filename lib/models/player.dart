@@ -64,7 +64,7 @@ class Player {
     skippedTurns = 0;
     consecutiveSixes = 0;
     extraTurns = 0;
-    lastDiceValue = 0;
+    lastDiceValue = 1;
   }
 
   bool get isFinished => tokens.every((t) => t.isFinished);

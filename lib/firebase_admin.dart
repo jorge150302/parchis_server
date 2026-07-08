@@ -76,7 +76,7 @@ bool get isAdminConfigured => File('service_account.json').existsSync();
 /// Returns `true` if valid. Returns `false` if the token is invalid/expired.
 /// Returns `true` as a dev bypass when `service_account.json` is absent.
 Future<bool> verifyIdToken(String? idToken) async {
-  if (idToken == null || idToken.isEmpty) return false;
   if (!isAdminConfigured) return true; // Dev mode bypass
+  if (idToken == null || idToken.isEmpty) return false;
   return await getUidFromToken(idToken) != null;
 }
