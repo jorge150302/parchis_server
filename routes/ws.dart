@@ -28,6 +28,7 @@ class GameRoom {
   Timer? turnTimer;
   Timer? maxDurationTimer;
   Timer? zombieCleanupTimer;
+  Timer? lobbyTimeoutTimer;
   int remainingSeconds = 20;
   int? forcedDice; // debug only: consumed on next roll
 
@@ -48,10 +49,17 @@ class GameRoom {
     maxDurationTimer = Timer(const Duration(minutes: 90), onExpired);
   }
 
+  void startLobbyTimeoutTimer(void Function() onExpired) {
+    lobbyTimeoutTimer?.cancel();
+    // 15 minutes to wait for players in the lobby
+    lobbyTimeoutTimer = Timer(const Duration(minutes: 15), onExpired);
+  }
+
   void stopAll() {
     turnTimer?.cancel();
     maxDurationTimer?.cancel();
     zombieCleanupTimer?.cancel();
+    lobbyTimeoutTimer?.cancel();
   }
 
   void startTimer(void Function() onTimeout) {
@@ -245,61 +253,63 @@ Future<Response> onRequest(RequestContext context) async {
             _broadcastGameState(roomCode);
           }
 
-          // Pre-game waiting room: destroy immediately — no grace period needed.
+          // Pre-game waiting room: allow some time for reconnection.
           if (room.engine.phase == GamePhase.idle) {
             room.clients.remove(playerId);
-            _channelToPlayer.remove(channel);
-            _channelToRoom.remove(channel);
-            final orphanRoom = _rooms.remove(roomCode);
-            if (orphanRoom != null) {
-              orphanRoom.broadcast({'event': 'error', 'data': {'code': 'ROOM_CLOSED', 'message': 'Room closed'}});
-              final uid = orphanRoom.playerUids.remove(playerId);
-              if (uid != null) unawaited(_clearActiveMatch(uid));
-              for (final uid2 in orphanRoom.playerUids.values) {
-                unawaited(_clearActiveMatch(uid2));
-              }
-              orphanRoom.playerUids.clear();
-              orphanRoom.stopAll();
-            }
-            return;
-          }
-
-          // Grace period: 90 seconds before permanently converting to AI.
-          _reconnectionTimers[playerId]?.cancel();
-          _reconnectionTimers[playerId] = Timer(const Duration(seconds: 90), () {
-            final p = room.engine.players.firstWhere(
-              (p) => p.id == playerId,
-              orElse: () => Player(id: '', name: ''),
-            );
-            if (p.id.isNotEmpty) {
-              p.isAI = true;
-              _broadcastGameState(roomCode);
-              // Clear active_match_id and count the abandoned match.
-              final uid = room.playerUids.remove(playerId);
-              if (uid != null) unawaited(_recordMatchAbandoned(uid));
-              _checkAndCleanupRoom(roomCode);
-            }
-            _reconnectionTimers.remove(playerId);
-          });
-
-          room.clients.remove(playerId);
-
-          // Zombie cleanup — remove room if all clients drop for 5 min.
-          if (room.clients.isEmpty) {
-            room.zombieCleanupTimer?.cancel();
-            room.zombieCleanupTimer = Timer(const Duration(minutes: 5), () {
-              if (_rooms[roomCode]?.clients.isEmpty ?? false) {
-                final orphanRoom = _rooms.remove(roomCode);
-                if (orphanRoom != null) {
-                  // Clear active_match_id for any remaining players.
-                  for (final uid in orphanRoom.playerUids.values) {
-                    unawaited(_clearActiveMatch(uid));
+            if (room.clients.isEmpty) {
+              room.zombieCleanupTimer?.cancel();
+              // 5 minutes grace period for empty lobby
+              room.zombieCleanupTimer = Timer(const Duration(minutes: 5), () {
+                if (_rooms[roomCode]?.clients.isEmpty ?? false) {
+                  final orphanRoom = _rooms.remove(roomCode);
+                  if (orphanRoom != null) {
+                    for (final uid in orphanRoom.playerUids.values) {
+                      unawaited(_clearActiveMatch(uid));
+                    }
+                    orphanRoom.playerUids.clear();
+                    orphanRoom.stopAll();
                   }
-                  orphanRoom.playerUids.clear();
-                  orphanRoom.stopAll();
                 }
+              });
+            }
+          } else {
+            // Grace period: 90 seconds before permanently converting to AI.
+            _reconnectionTimers[playerId]?.cancel();
+            _reconnectionTimers[playerId] = Timer(const Duration(seconds: 90), () {
+              final p = room.engine.players.firstWhere(
+                (p) => p.id == playerId,
+                orElse: () => Player(id: '', name: ''),
+              );
+              if (p.id.isNotEmpty) {
+                p.isAI = true;
+                _broadcastGameState(roomCode);
+                // Clear active_match_id and count the abandoned match.
+                final uid = room.playerUids.remove(playerId);
+                if (uid != null) unawaited(_recordMatchAbandoned(uid));
+                _checkAndCleanupRoom(roomCode);
               }
+              _reconnectionTimers.remove(playerId);
             });
+
+            room.clients.remove(playerId);
+
+            // Zombie cleanup — remove room if all clients drop for 5 min.
+            if (room.clients.isEmpty) {
+              room.zombieCleanupTimer?.cancel();
+              room.zombieCleanupTimer = Timer(const Duration(minutes: 5), () {
+                if (_rooms[roomCode]?.clients.isEmpty ?? false) {
+                  final orphanRoom = _rooms.remove(roomCode);
+                  if (orphanRoom != null) {
+                    // Clear active_match_id for any remaining players.
+                    for (final uid in orphanRoom.playerUids.values) {
+                      unawaited(_clearActiveMatch(uid));
+                    }
+                    orphanRoom.playerUids.clear();
+                    orphanRoom.stopAll();
+                  }
+                }
+              });
+            }
           }
         }
       }
@@ -740,7 +750,16 @@ void _createAndJoinRoom(
   channel.sink.add(jsonEncode({'event': 'game_created', 'data': {'roomCode': roomCode}}));
   _broadcastGameState(roomCode);
 
+  room.startLobbyTimeoutTimer(() {
+    if (_rooms[roomCode]?.engine.phase == GamePhase.idle) {
+      final orphanRoom = _rooms.remove(roomCode);
+      orphanRoom?.broadcast({'event': 'error', 'data': {'code': 'LOBBY_TIMEOUT', 'message': 'Lobby timeout'}});
+      orphanRoom?.stopAll();
+    }
+  });
+
   if (room.engine.phase == GamePhase.rolling) {
+    room.lobbyTimeoutTimer?.cancel();
     room.startTimer(() => _handleTimeout(roomCode));
   }
 }
@@ -826,6 +845,7 @@ void _joinToRoom(
   _broadcastGameState(room.code);
 
   if (gameJustStarted) {
+    room.lobbyTimeoutTimer?.cancel();
     room.startTimer(() => _handleTimeout(room.code));
     room.startMaxDurationTimer(() {
       _rooms.remove(room.code)?.stopAll();
