@@ -247,15 +247,16 @@ Future<Response> onRequest(RequestContext context) async {
             (p) => p.id == playerId,
             orElse: () => Player(id: '', name: ''),
           );
-          if (player.id.isNotEmpty) {
-            player.isConnected = false;
-            player.isAutoPlaying = true;
-            _broadcastGameState(roomCode);
-          }
 
-          // Pre-game waiting room: allow some time for reconnection.
+          // Pre-game waiting room: remove immediately to free slot and update count.
           if (room.engine.phase == GamePhase.idle) {
             room.clients.remove(playerId);
+            room.engine.players.removeWhere((p) => p.id == playerId);
+            final uid = room.playerUids.remove(playerId);
+            if (uid != null) unawaited(_clearActiveMatch(uid));
+
+            _broadcastGameState(roomCode);
+
             if (room.clients.isEmpty) {
               room.zombieCleanupTimer?.cancel();
               // 5 minutes grace period for empty lobby
@@ -266,13 +267,18 @@ Future<Response> onRequest(RequestContext context) async {
                     for (final uid in orphanRoom.playerUids.values) {
                       unawaited(_clearActiveMatch(uid));
                     }
-                    orphanRoom.playerUids.clear();
                     orphanRoom.stopAll();
                   }
                 }
               });
             }
           } else {
+            if (player.id.isNotEmpty) {
+              player.isConnected = false;
+              player.isAutoPlaying = true;
+              _broadcastGameState(roomCode);
+            }
+
             // Grace period: 90 seconds before permanently converting to AI.
             _reconnectionTimers[playerId]?.cancel();
             _reconnectionTimers[playerId] = Timer(const Duration(seconds: 90), () {
@@ -304,7 +310,6 @@ Future<Response> onRequest(RequestContext context) async {
                     for (final uid in orphanRoom.playerUids.values) {
                       unawaited(_clearActiveMatch(uid));
                     }
-                    orphanRoom.playerUids.clear();
                     orphanRoom.stopAll();
                   }
                 }
