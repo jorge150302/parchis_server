@@ -19,10 +19,11 @@ class GameEngine {
   GameEngine({
     required this.board,
     required this.players,
-  });
+    Random? random,
+  }) : _random = random ?? Random();
   final Board board;
   final List<Player> players;
-  final Random _random = Random();
+  final Random _random;
   final List<Player> finishedPlayers = [];
 
   int _currentPlayerIndex = 0;
@@ -37,6 +38,8 @@ class GameEngine {
   }
 
   void nextTurn() {
+    // Three-sixes counts consecutive rolls within one turn only.
+    if (players.isNotEmpty) currentPlayer.consecutiveSixes = 0;
     final remainingPlayers = players.where((p) => !p.isFinished).length;
     
     // Si solo queda un jugador con fichas activas, la partida termina.

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:dart_firebase_admin/firestore.dart' show FieldValue;
 import 'package:dart_frog/dart_frog.dart';
@@ -214,21 +215,40 @@ void _checkAndCleanupRoom(String roomCode) {
       _broadcastGameState(roomCode);
       
       // Schedule cleanup
-      Timer(const Duration(seconds: 30), () => _rooms.remove(roomCode)?.stopAll());
+      Timer(const Duration(seconds: 30), () => _closeRoom(room));
       return;
     }
   }
 
-  if (humansRemaining.isEmpty) {
-    final orphanRoom = _rooms.remove(roomCode);
-    if (orphanRoom != null) {
-      for (final uid in orphanRoom.playerUids.values) {
-        unawaited(_clearActiveMatch(uid));
-      }
-      orphanRoom.playerUids.clear();
-      orphanRoom.stopAll();
-    }
+  if (humansRemaining.isEmpty) _closeRoom(room);
+}
+
+/// Removes [room] if it is still the room registered under its code (a
+/// delayed timer must not close a newer room that reused the code), stops its
+/// timers, frees every player's match bookkeeping and, if [errorCode] is
+/// given, tells the connected clients why.
+void _closeRoom(GameRoom room, {String? errorCode}) {
+  if (_rooms[room.code] != room) return;
+  _rooms.remove(room.code);
+  room.stopAll();
+  if (errorCode != null) {
+    room.broadcast({
+      'event': 'error',
+      'data': {'code': errorCode, 'message': errorCode},
+    });
   }
+  for (final uid in room.playerUids.values) {
+    unawaited(_clearActiveMatch(uid));
+  }
+  room.playerUids.clear();
+  for (final player in room.engine.players) {
+    _reconnectionTimers.remove(player.id)?.cancel();
+  }
+  for (final channel in room.clients.values) {
+    _channelToRoom.remove(channel);
+    _channelToPlayer.remove(channel);
+  }
+  room.clients.clear();
 }
 
 // --- WebSocket handler ---
@@ -261,15 +281,7 @@ Future<Response> onRequest(RequestContext context) async {
               room.zombieCleanupTimer?.cancel();
               // 5 minutes grace period for empty lobby
               room.zombieCleanupTimer = Timer(const Duration(minutes: 5), () {
-                if (_rooms[roomCode]?.clients.isEmpty ?? false) {
-                  final orphanRoom = _rooms.remove(roomCode);
-                  if (orphanRoom != null) {
-                    for (final uid in orphanRoom.playerUids.values) {
-                      unawaited(_clearActiveMatch(uid));
-                    }
-                    orphanRoom.stopAll();
-                  }
-                }
+                if (room.clients.isEmpty) _closeRoom(room);
               });
             }
           } else {
@@ -303,16 +315,7 @@ Future<Response> onRequest(RequestContext context) async {
             if (room.clients.isEmpty) {
               room.zombieCleanupTimer?.cancel();
               room.zombieCleanupTimer = Timer(const Duration(minutes: 5), () {
-                if (_rooms[roomCode]?.clients.isEmpty ?? false) {
-                  final orphanRoom = _rooms.remove(roomCode);
-                  if (orphanRoom != null) {
-                    // Clear active_match_id for any remaining players.
-                    for (final uid in orphanRoom.playerUids.values) {
-                      unawaited(_clearActiveMatch(uid));
-                    }
-                    orphanRoom.stopAll();
-                  }
-                }
+                if (room.clients.isEmpty) _closeRoom(room);
               });
             }
           }
@@ -351,6 +354,14 @@ Future<Response> onRequest(RequestContext context) async {
             return;
           }
 
+          // A channel already seated in a room speaks only for that seat, so
+          // a client cannot act (surrender, chat, auto-play) as another player.
+          final boundId = _channelToPlayer[channel];
+          if (boundId != null && boundId != clientId) {
+            _sendError(channel, 'clientId no coincide.', code: 'CLIENT_MISMATCH');
+            return;
+          }
+
           // --- request_sync: player reconnects after disconnect ---
           if (eventName == 'request_sync') {
             // Single-session check: reject if another device holds this account.
@@ -379,6 +390,14 @@ Future<Response> onRequest(RequestContext context) async {
 
             if (userRoom != null) {
               final player = userRoom.engine.players.firstWhere((p) => p.id == clientId);
+              // clientIds are broadcast to every player, so knowing one is not
+              // proof of owning the seat: require the same Firebase account.
+              final seatUid = userRoom.playerUids[clientId];
+              if (seatUid != null && seatUid != syncUid) {
+                _sendError(channel, 'No puedes unirte a esta partida.',
+                    code: 'CANNOT_REJOIN');
+                return;
+              }
               if (player.isAI) {
                 _sendError(channel, 'No se encontró una partida activa para este ID.',
                     code: 'MATCH_NOT_FOUND');
@@ -491,7 +510,7 @@ Future<Response> onRequest(RequestContext context) async {
               _sendError(channel, 'Auth required.', code: 'UNAUTHORIZED');
               return;
             }
-            final targetMaxPlayers = (data['maxPlayers'] as int?) ?? 2;
+            final targetMaxPlayers = _clampMaxPlayers(data['maxPlayers']);
             GameRoom? foundRoom;
             for (final room in _rooms.values) {
               if (room.isPublic &&
@@ -523,12 +542,16 @@ Future<Response> onRequest(RequestContext context) async {
               _sendError(channel, 'Auth required.', code: 'UNAUTHORIZED');
               return;
             }
+            // Test rooms let their members force dice, so they are only
+            // available when the operator allows them and are never public.
+            final testMode =
+                testModeAllowed && ((data['testMode'] as bool?) ?? false);
             _createAndJoinRoom(
               channel, clientId, data['name'] as String?,
-              (data['maxPlayers'] as int?) ?? 2,
-              (data['isPublic'] as bool?) ?? false,
+              _clampMaxPlayers(data['maxPlayers']),
+              !testMode && ((data['isPublic'] as bool?) ?? false),
               level, avatarType, avatarIconId, idToken,
-              testMode: (data['testMode'] as bool?) ?? false,
+              testMode: testMode,
             );
           }
 
@@ -538,6 +561,12 @@ Future<Response> onRequest(RequestContext context) async {
               return;
             }
             final room = _rooms[data['roomCode'] ?? ''];
+            final seatUid = room?.playerUids[clientId];
+            if (seatUid != null && seatUid != await getUidFromToken(idToken)) {
+              _sendError(channel, 'No puedes unirte a esta partida.',
+                  code: 'CANNOT_REJOIN');
+              return;
+            }
             if (room != null) {
               _joinToRoom(channel, room, clientId, data['name'] as String?,
                   level, avatarType, avatarIconId, idToken);
@@ -568,8 +597,18 @@ Future<Response> onRequest(RequestContext context) async {
 
           if (eventName == 'skip_turn') {
             _updatePlayerLevel(clientId, level);
+            // Only accepted from the current player when the server agrees
+            // there is no legal move for the rolled value.
             final roomCode = _channelToRoom[channel];
-            if (roomCode != null) _moveToNextTurnWithSkips(roomCode);
+            final room = roomCode != null ? _rooms[roomCode] : null;
+            if (room != null &&
+                room.engine.players.isNotEmpty &&
+                room.engine.currentPlayer.id == _channelToPlayer[channel] &&
+                room.engine.phase == GamePhase.choosingToken &&
+                !room.engine.canMoveAnyToken(
+                    room.engine.currentPlayer, room.engine.lastDiceValue)) {
+              _moveToNextTurnWithSkips(roomCode!);
+            }
           }
 
           if (eventName == 'chat_message') {
@@ -581,13 +620,18 @@ Future<Response> onRequest(RequestContext context) async {
                   (p) => p.id == clientId,
                   orElse: () => Player(id: '', name: ''),
                 );
-                if (player.id.isNotEmpty) {
+                final message = data['message'];
+                if (player.id.isNotEmpty &&
+                    message is String &&
+                    message.trim().isNotEmpty) {
                   room.broadcast({
                     'event': 'chat',
                     'data': {
                       'sender': player.name,
                       'senderId': clientId,
-                      'message': data['message'],
+                      'message': message.length > _maxChatLength
+                          ? message.substring(0, _maxChatLength)
+                          : message,
                     },
                   });
                 }
@@ -714,6 +758,23 @@ void _updatePlayerLevel(String clientId, int level) {
 
 // --- Funciones de Gestión de Salas ---
 
+const _maxChatLength = 200;
+final _roomCodeRandom = Random.secure();
+
+/// A random, currently unused 5-digit room code. Random (not clock-based) so
+/// codes can't be guessed and two rooms created in the same tick don't collide.
+String _newRoomCode() {
+  String code;
+  do {
+    code = _roomCodeRandom.nextInt(100000).toString().padLeft(5, '0');
+  } while (_rooms.containsKey(code));
+  return code;
+}
+
+/// Parchís seats 2–4 players; anything else from the client falls back into range.
+int _clampMaxPlayers(Object? value) =>
+    ((value is int) ? value : 2).clamp(2, 4);
+
 void _createAndJoinRoom(
   WebSocketChannel channel,
   String clientId,
@@ -726,8 +787,7 @@ void _createAndJoinRoom(
   String? idToken, {
   bool testMode = false,
 }) {
-  final roomCode =
-      (DateTime.now().millisecondsSinceEpoch % 100000).toString().padLeft(5, '0');
+  final roomCode = _newRoomCode();
   final board = generateBoard(classicActionPositions, classicActions, totalCells: 100);
   final engine = GameEngine(board: board, players: []);
   final room = GameRoom(roomCode, engine, maxPlayers, isPublic: isPublic, testMode: testMode);
@@ -756,10 +816,8 @@ void _createAndJoinRoom(
   _broadcastGameState(roomCode);
 
   room.startLobbyTimeoutTimer(() {
-    if (_rooms[roomCode]?.engine.phase == GamePhase.idle) {
-      final orphanRoom = _rooms.remove(roomCode);
-      orphanRoom?.broadcast({'event': 'error', 'data': {'code': 'LOBBY_TIMEOUT', 'message': 'Lobby timeout'}});
-      orphanRoom?.stopAll();
+    if (room.engine.phase == GamePhase.idle) {
+      _closeRoom(room, errorCode: 'LOBBY_TIMEOUT');
     }
   });
 
@@ -853,7 +911,7 @@ void _joinToRoom(
     room.lobbyTimeoutTimer?.cancel();
     room.startTimer(() => _handleTimeout(room.code));
     room.startMaxDurationTimer(() {
-      _rooms.remove(room.code)?.stopAll();
+      _closeRoom(room, errorCode: 'MATCH_TIMEOUT');
     });
   }
 }
@@ -865,6 +923,7 @@ void _handleRollDice(WebSocketChannel? channel, {String? roomCode, String? playe
   final room = _rooms[rCode];
   if (room != null) {
     if (room.engine.currentPlayer.id != pId) return;
+    if (room.engine.phase != GamePhase.rolling) return;
     room.stopTimer();
 
     final diceValue = (room.testMode && room.forcedDice != null)
@@ -913,9 +972,15 @@ Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
   if (rCode == null || pId == null) return;
   final room = _rooms[rCode];
   if (room == null) return;
+  // Only the current player may move, and only once per roll: the phase flips
+  // to `moving` synchronously below, so a double-tap or a move racing the
+  // timeout is rejected here.
+  if (room.engine.currentPlayer.id != pId) return;
+  if (room.engine.phase != GamePhase.choosingToken) return;
+  final tokens = room.engine.currentPlayer.tokens.where((t) => t.id == tokenId);
+  if (tokens.isEmpty) return;
+  final token = tokens.first;
   room.stopTimer();
-  final token =
-      room.engine.currentPlayer.tokens.firstWhere((t) => t.id == tokenId);
   if (!room.engine.canMove(token, room.engine.lastDiceValue)) {
     room.startTimer(() => _handleTimeout(rCode));
     return;
@@ -923,6 +988,8 @@ Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
   room.engine.phase = GamePhase.moving;
   _broadcastGameState(rCode);
   await Future<void>.delayed(const Duration(milliseconds: 300));
+  // The room may have been closed while we waited.
+  if (_rooms[rCode] != room) return;
 
   final diceValue = room.engine.lastDiceValue;
   for (var i = 0; i < diceValue; i++) {
@@ -940,6 +1007,7 @@ Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
 
   // Wait for step animation on clients (200ms per step + 300ms buffer).
   await Future<void>.delayed(Duration(milliseconds: diceValue * 200 + 300));
+  if (_rooms[rCode] != room) return;
 
   // Capture cell action before applying (position changes after apply).
   BoardAction? cellAction;
@@ -1084,7 +1152,7 @@ void _moveToNextTurnWithSkips(String roomCode) {
       }
     }
     // Keep room alive for 60 s so spectators can see the final board.
-    Timer(const Duration(seconds: 60), () => _rooms.remove(roomCode)?.stopAll());
+    Timer(const Duration(seconds: 60), () => _closeRoom(room));
   } else {
     room.startTimer(() => _handleTimeout(roomCode));
   }
@@ -1133,7 +1201,8 @@ void _sendError(WebSocketChannel c, String m, {String? code}) =>
 
 void _broadcastGameState(String roomCode) {
   final room = _rooms[roomCode];
-  if (room == null) return;
+  // An emptied lobby has no currentPlayer to serialize (and no one to tell).
+  if (room == null || room.engine.players.isEmpty) return;
   var phaseStr = 'idle';
   switch (room.engine.phase) {
     case GamePhase.idle:

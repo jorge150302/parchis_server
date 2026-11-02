@@ -71,12 +71,23 @@ Future<String?> getUidFromToken(String? idToken) async {
 /// `true` when `service_account.json` exists next to the server root.
 bool get isAdminConfigured => File('service_account.json').existsSync();
 
+/// `true` only when the operator explicitly opts into running without Firebase
+/// Admin (`PARCHIS_DEV_AUTH_BYPASS=true`). A deploy that merely lacks
+/// `service_account.json` must fail closed, not silently disable auth.
+bool get devAuthBypass =>
+    Platform.environment['PARCHIS_DEV_AUTH_BYPASS'] == 'true';
+
+/// `true` when debug-only room features (`testMode`, forced dice) may be used
+/// (`PARCHIS_ALLOW_TEST_MODE=true`). Never enable in production.
+bool get testModeAllowed =>
+    Platform.environment['PARCHIS_ALLOW_TEST_MODE'] == 'true';
+
 /// Verifies [idToken] against Firebase Auth.
 ///
 /// Returns `true` if valid. Returns `false` if the token is invalid/expired.
-/// Returns `true` as a dev bypass when `service_account.json` is absent.
+/// Without `service_account.json`, returns [devAuthBypass] (default `false`).
 Future<bool> verifyIdToken(String? idToken) async {
-  if (!isAdminConfigured) return true; // Dev mode bypass
+  if (!isAdminConfigured) return devAuthBypass;
   if (idToken == null || idToken.isEmpty) return false;
   return await getUidFromToken(idToken) != null;
 }
