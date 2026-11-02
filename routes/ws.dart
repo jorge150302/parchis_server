@@ -7,6 +7,7 @@ import 'package:dart_frog/dart_frog.dart';
 import 'package:dart_frog_web_socket/dart_frog_web_socket.dart';
 import 'package:parchis_server/firebase_admin.dart';
 import 'package:parchis_server/game_engine.dart';
+import 'package:parchis_server/server_stats.dart';
 import 'package:parchis_server/logic/board_generator.dart';
 import 'package:parchis_server/logic/board_presets.dart';
 import 'package:parchis_server/models/board_action.dart';
@@ -253,7 +254,30 @@ void _closeRoom(GameRoom room, {String? errorCode}) {
 
 // --- WebSocket handler ---
 
+var _statsRegistered = false;
+
+void _registerStats() {
+  if (_statsRegistered) return;
+  _statsRegistered = true;
+  registerServerStats(() {
+    final byPhase = <String, int>{};
+    for (final room in _rooms.values) {
+      final phase = room.engine.phase.name;
+      byPhase[phase] = (byPhase[phase] ?? 0) + 1;
+    }
+    return {
+      'rooms': _rooms.length,
+      'roomsByPhase': byPhase,
+      'connections': _channelToPlayer.length,
+      'reconnectionTimers': _reconnectionTimers.length,
+      'activeUids': _activeUids.length,
+      'uidSessions': _uidSessions.length,
+    };
+  });
+}
+
 Future<Response> onRequest(RequestContext context) async {
+  _registerStats();
   final handler = webSocketHandler((channel, protocol) {
 
     void handleDisconnect() {
