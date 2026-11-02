@@ -163,8 +163,11 @@ class GameEngine {
     return sentHome;
   }
 
-  Player? resolveCollisions(Token token) {
-    if (token.isFinished) return null;
+  /// Sends every opposing token on [token]'s cell home and returns the
+  /// owner of each captured token (one entry per capture, +1 extra turn each).
+  List<Player> resolveCollisions(Token token) {
+    final captured = <Player>[];
+    if (token.isFinished || token.position <= 0) return captured;
 
     for (final otherPlayer in players) {
       if (otherPlayer.id == currentPlayer.id) continue;
@@ -179,10 +182,10 @@ class GameEngine {
           if (!currentPlayer.isFinished) {
             currentPlayer.extraTurns++;
           }
-          return otherPlayer;
+          captured.add(otherPlayer);
         }
       }
     }
-    return null;
+    return captured;
   }
 }

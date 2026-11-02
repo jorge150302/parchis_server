@@ -631,7 +631,7 @@ Future<Response> onRequest(RequestContext context) async {
             if (uid != null) unawaited(_clearActiveMatch(uid));
 
             // Confirm surrender to the leaving player.
-            channel.sink.add(jsonEncode({'event': 'surrendered', 'data': {}}));
+            channel.sink.add(jsonEncode({'event': 'surrendered', 'data': <String, dynamic>{}}));
 
             // Convert to AI so the game continues.
             player.isAI = true;
@@ -922,7 +922,7 @@ Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
   }
   room.engine.phase = GamePhase.moving;
   _broadcastGameState(rCode);
-  await Future.delayed(const Duration(milliseconds: 300));
+  await Future<void>.delayed(const Duration(milliseconds: 300));
 
   final diceValue = room.engine.lastDiceValue;
   for (var i = 0; i < diceValue; i++) {
@@ -939,7 +939,7 @@ Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
   }
 
   // Wait for step animation on clients (200ms per step + 300ms buffer).
-  await Future.delayed(Duration(milliseconds: diceValue * 200 + 300));
+  await Future<void>.delayed(Duration(milliseconds: diceValue * 200 + 300));
 
   // Capture cell action before applying (position changes after apply).
   BoardAction? cellAction;
@@ -961,9 +961,9 @@ Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
     }
   }
 
-  final Player? capturedPlayer = room.engine.resolveCollisions(token);
-  if (capturedPlayer != null) {
-    bonusSent = true;
+  final capturedPlayers = room.engine.resolveCollisions(token);
+  if (capturedPlayers.isNotEmpty) bonusSent = true;
+  for (final capturedPlayer in capturedPlayers) {
     // room.engine.currentPlayer.extraTurns++ ya se hace en resolveCollisions del motor
     room.broadcast({'event': 'game_event', 'data': {
       'message': 'captured_player',
@@ -1128,8 +1128,6 @@ void _broadcastCellActionEvent(String roomCode, Player player, Token token, Boar
 }
 void _broadcastDiceResult(String r, int v, String p) =>
     _rooms[r]?.broadcast({'event': 'dice_result', 'data': {'diceValue': v, 'playerId': p}});
-void _broadcastInfo(String r, String m) =>
-    _rooms[r]?.broadcast({'event': 'info', 'data': {'message': m}});
 void _sendError(WebSocketChannel c, String m, {String? code}) =>
     c.sink.add(jsonEncode({'event': 'error', 'data': {'message': m, 'code': code}}));
 
