@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:dart_firebase_admin/firestore.dart' show FieldValue;
+import 'package:google_cloud_firestore/google_cloud_firestore.dart' show FieldValue;
 import 'package:dart_frog/dart_frog.dart';
 import 'package:dart_frog_web_socket/dart_frog_web_socket.dart';
 import 'package:parchis_server/firebase_admin.dart';

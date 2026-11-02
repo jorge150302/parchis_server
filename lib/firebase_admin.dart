@@ -1,17 +1,15 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:dart_firebase_admin/auth.dart';
-import 'package:dart_firebase_admin/dart_firebase_admin.dart';
-import 'package:dart_firebase_admin/firestore.dart';
+import 'package:firebase_admin_sdk/auth.dart';
+import 'package:firebase_admin_sdk/firebase_admin_sdk.dart';
+import 'package:google_cloud_firestore/google_cloud_firestore.dart' show Firestore;
 
-FirebaseAdminApp? _adminApp;
-late Auth _adminAuth;
-late Firestore _adminFirestore;
+FirebaseApp? _adminApp;
 
-/// Returns the lazily-initialised [FirebaseAdminApp].
+/// Returns the lazily-initialised [FirebaseApp].
 /// Throws [StateError] if `service_account.json` is missing.
-FirebaseAdminApp getAdminApp() {
+FirebaseApp getAdminApp() {
   if (_adminApp != null) return _adminApp!;
 
   final saFile = File('service_account.json');
@@ -23,35 +21,20 @@ FirebaseAdminApp getAdminApp() {
   }
 
   final saJson = jsonDecode(saFile.readAsStringSync()) as Map<String, dynamic>;
-  final projectId = saJson['project_id'] as String;
-  final clientEmail = saJson['client_email'] as String;
-  final privateKey = saJson['private_key'] as String;
-  final clientId = saJson['client_id'] as String;
-
-  _adminApp = FirebaseAdminApp.initializeApp(
-    projectId,
-    Credential.fromServiceAccountParams(
-      clientId: clientId,
-      privateKey: privateKey,
-      email: clientEmail,
+  _adminApp = FirebaseApp.initializeApp(
+    options: AppOptions(
+      credential: Credential.fromServiceAccount(saFile),
+      projectId: saJson['project_id'] as String,
     ),
   );
-  _adminAuth = Auth(_adminApp!);
-  _adminFirestore = Firestore(_adminApp!);
   return _adminApp!;
 }
 
 /// Returns the [Auth] instance, initialising Firebase Admin if needed.
-Auth getAdminAuth() {
-  getAdminApp();
-  return _adminAuth;
-}
+Auth getAdminAuth() => getAdminApp().auth();
 
 /// Returns the [Firestore] instance, initialising Firebase Admin if needed.
-Firestore getAdminFirestore() {
-  getAdminApp();
-  return _adminFirestore;
-}
+Firestore getAdminFirestore() => getAdminApp().firestore();
 
 /// Verifies [idToken] and returns the authenticated user's UID.
 ///
