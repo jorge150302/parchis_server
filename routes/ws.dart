@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:google_cloud_firestore/google_cloud_firestore.dart' show FieldValue;
@@ -111,6 +112,13 @@ final Map<String, String> _activeUids = {};
 // Different devices have different clientIds, so reconnects from the same device are never blocked.
 final Map<String, String> _uidSessions = {};
 
+/// Errors go to stderr so the host's log collector sees them; a failing
+/// handler must never be silent.
+void _logError(String where, Object error, [StackTrace? stack]) {
+  stderr.writeln('[${DateTime.now().toUtc().toIso8601String()}] ERROR $where: $error');
+  if (stack != null) stderr.writeln(stack);
+}
+
 // --- Firestore helpers ---
 
 Future<void> _setActiveMatch(String uid, String roomCode) async {
@@ -120,7 +128,9 @@ Future<void> _setActiveMatch(String uid, String roomCode) async {
         .collection('users')
         .doc(uid)
         .update({'active_match_id': roomCode});
-  } catch (_) {}
+  } catch (e) {
+    _logError('_setActiveMatch', e);
+  }
 }
 
 Future<void> _clearActiveMatch(String uid) async {
@@ -131,7 +141,9 @@ Future<void> _clearActiveMatch(String uid) async {
         .collection('users')
         .doc(uid)
         .update({'active_match_id': null});
-  } catch (_) {}
+  } catch (e) {
+    _logError('_clearActiveMatch', e);
+  }
 }
 
 /// Records an abandoned match (grace period expiry) — increments matches_played.
@@ -143,7 +155,9 @@ Future<void> _recordMatchAbandoned(String uid) async {
       'matches_played': const FieldValue.increment(1),
       'active_match_id': null,
     });
-  } catch (_) {}
+  } catch (e) {
+    _logError('_recordMatchAbandoned', e);
+  }
 }
 
 /// Resolves the Firebase UID from [idToken], stores it in the room, and writes
@@ -616,7 +630,8 @@ Future<Response> onRequest(RequestContext context) async {
           if (eventName == 'move_token') {
             _updatePlayerLevel(clientId, level);
             final tokenId = data['tokenId'] as int?;
-            if (tokenId != null) unawaited(_handleMoveToken(channel, tokenId));
+            if (tokenId != null) unawaited(_handleMoveToken(channel, tokenId).catchError(
+          (Object e, StackTrace st) => _logError('move_token', e, st)));
           }
 
           if (eventName == 'skip_turn') {
@@ -758,7 +773,9 @@ Future<Response> onRequest(RequestContext context) async {
             }
             return;
           }
-        } catch (e) { /* Error silencioso */ }
+        } catch (e, st) {
+          _logError('ws message', e, st);
+        }
       },
       onDone: handleDisconnect,
       onError: (dynamic error) => handleDisconnect(),
@@ -1123,7 +1140,8 @@ void _handleTimeout(String roomCode) {
     }
     if (best != null) {
       unawaited(_handleMoveToken(null, best.id,
-          roomCode: roomCode, playerId: room.engine.currentPlayer.id));
+          roomCode: roomCode, playerId: room.engine.currentPlayer.id).catchError(
+          (Object e, StackTrace st) => _logError('move_token', e, st)));
     } else {
       _moveToNextTurnWithSkips(roomCode);
     }
