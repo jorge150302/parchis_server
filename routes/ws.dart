@@ -947,23 +947,32 @@ Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
     cellAction = room.engine.board.getCell(token.position).action;
   }
 
+  bool bonusSent = false;
+
   // skipTurn + dice-6 exception: cancel both effects instead of applying either.
   final bool skipTurnDice6 = cellAction?.type == BoardActionType.skipTurn && diceValue == 6;
   if (!skipTurnDice6) {
     room.engine.applyCellAction(room.engine.currentPlayer, token);
     if (cellAction != null) {
       _broadcastCellActionEvent(rCode, room.engine.currentPlayer, token, cellAction);
+      if (cellAction.type == BoardActionType.rollAgain) {
+        bonusSent = true;
+      }
     }
   }
 
-  final bool captured = room.engine.resolveCollisions(token);
-  if (captured) {
+  final Player? capturedPlayer = room.engine.resolveCollisions(token);
+  if (capturedPlayer != null) {
+    bonusSent = true;
     // room.engine.currentPlayer.extraTurns++ ya se hace en resolveCollisions del motor
     room.broadcast({'event': 'game_event', 'data': {
       'message': 'captured_player',
       'playerId': room.engine.currentPlayer.id,
       'type': 'bonus',
-      'args': {'name': room.engine.currentPlayer.name},
+      'args': {
+        'name': room.engine.currentPlayer.name,
+        'other': capturedPlayer.name,
+      },
     }});
   }
 
@@ -973,17 +982,24 @@ Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
   }
 
   if (room.engine.currentPlayer.isFinished) {
+    bonusSent = true;
     _notifyAndClearPlayerFinish(rCode, room.engine.currentPlayer);
     room.engine.currentPlayer.extraTurns = 0;
     _moveToNextTurnWithSkips(rCode);
   } else if (room.engine.currentPlayer.extraTurns > 0) {
     room.engine.currentPlayer.extraTurns--;
-    room.broadcast({'event': 'game_event', 'data': {
-      'message': 'extra_turn',
-      'playerId': room.engine.currentPlayer.id,
-      'type': 'bonus',
-      'args': {'name': room.engine.currentPlayer.name},
-    }});
+
+    // Solo enviamos 'extra_turn' si no hemos enviado ya un mensaje de bonus específico
+    // o si aún quedan más turnos extra acumulados (ej: sacó un 6 Y capturó).
+    if (!bonusSent || room.engine.currentPlayer.extraTurns > 0) {
+      room.broadcast({'event': 'game_event', 'data': {
+        'message': 'extra_turn',
+        'playerId': room.engine.currentPlayer.id,
+        'type': 'bonus',
+        'args': {'name': room.engine.currentPlayer.name},
+      }});
+    }
+
     room.engine.phase = GamePhase.rolling;
     _broadcastGameState(rCode);
     room.startTimer(() => _handleTimeout(rCode));
@@ -1097,7 +1113,7 @@ void _broadcastCellActionEvent(String roomCode, Player player, Token token, Boar
       type = 'penalty';
     case BoardActionType.moveTo:
       msgKey = 'cell_action_move_to';
-      type = (action.targetNumber != null && !token.isFinished && action.targetNumber! > token.position) ? 'bonus' : 'penalty';
+      type = 'move';
       args['cell'] = token.isFinished ? '${room.engine.board.finalPosition}' : '${action.targetNumber}';
   }
   room.broadcast({

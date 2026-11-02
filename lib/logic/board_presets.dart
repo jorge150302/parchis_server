@@ -3,7 +3,7 @@
 import 'package:parchis_server/models/board_action.dart';
 
 final classicActionPositions = [
-  13, 15, 19, 24, 29, 37, 43, 49, 56, 66, 72, 76, 79, 83, 93, 97,
+  13, 15, 19, 24, 29, 37, 43, 49, 58, 66, 72, 78, 81, 83, 93, 97,
 ];
 
 final classicActions = [
@@ -15,12 +15,12 @@ final classicActions = [
   BoardAction.skipTurn(),       // 37
   BoardAction.moveTo(25),       // 43
   BoardAction.moveTo(70),       // 49
-  BoardAction.moveTo(18),       // 56
+  BoardAction.moveTo(25),       // 58
   BoardAction.skipTurn(),       // 66
   BoardAction.rollAgain(),      // 72
-  BoardAction.moveTo(18),       // 76
-  BoardAction.goToStart(),      // 79
-  BoardAction.moveTo(23),       // 83
-  BoardAction.goToStart(),      // 93
-  BoardAction.moveTo(70),       // 97
+  BoardAction.moveTo(45),       // 78
+  BoardAction.moveTo(50),       // 81
+  BoardAction.moveTo(55),       // 83
+  BoardAction.moveTo(65),       // 93
+  BoardAction.moveTo(90),       // 97
 ];

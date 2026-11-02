@@ -163,10 +163,9 @@ class GameEngine {
     return sentHome;
   }
 
-  bool resolveCollisions(Token token) {
-    if (token.isFinished) return false;
+  Player? resolveCollisions(Token token) {
+    if (token.isFinished) return null;
 
-    var sentHome = false;
     for (final otherPlayer in players) {
       if (otherPlayer.id == currentPlayer.id) continue;
 
@@ -176,14 +175,14 @@ class GameEngine {
 
         if (otherToken.position == token.position) {
           otherToken.reset();
-          sentHome = true;
           // El bono de captura se suma al contador
           if (!currentPlayer.isFinished) {
             currentPlayer.extraTurns++;
           }
+          return otherPlayer;
         }
       }
     }
-    return sentHome;
+    return null;
   }
 }
