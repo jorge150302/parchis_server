@@ -4,7 +4,10 @@
 //
 // Run against a server started WITHOUT service_account.json:
 //   PARCHIS_DEV_AUTH_BYPASS=true PORT=8099 dart build/bin/server.dart
-//   dart run tool/stress_test.dart ws://localhost:8099/ws
+//   dart run tool/stress_test.dart ws://localhost:8099/ws [minutes] [--quick]
+//
+// --quick (for CI): only private test-mode rooms, whose tokens start next to
+// the goal, so games end in seconds. Needs PARCHIS_ALLOW_TEST_MODE=true.
 // ignore_for_file: avoid_print
 
 import 'dart:async';
@@ -57,8 +60,12 @@ class Bot {
 
   void sendRaw(String raw) => _ws?.add(raw);
 
-  Future<String> createGame(int maxPlayers) {
-    send('create_game', {'name': clientId, 'maxPlayers': maxPlayers});
+  Future<String> createGame(int maxPlayers, {bool testMode = false}) {
+    send('create_game', {
+      'name': clientId,
+      'maxPlayers': maxPlayers,
+      if (testMode) 'testMode': true,
+    });
     return _created.future;
   }
 
@@ -188,14 +195,19 @@ class Bot {
 }
 
 Future<void> main(List<String> args) async {
-  final url = args.isNotEmpty ? args.first : 'ws://localhost:8099/ws';
-  final timeLimit = Duration(minutes: args.length > 1 ? int.parse(args[1]) : 10);
+  final quick = args.contains('--quick');
+  final positional = args.where((a) => !a.startsWith('--')).toList();
+  final url = positional.isNotEmpty ? positional.first : 'ws://localhost:8099/ws';
+  final timeLimit =
+      Duration(minutes: positional.length > 1 ? int.parse(positional[1]) : 10);
   final sw = Stopwatch()..start();
   var n = 0;
   String id() => 'bot${n++}';
 
   // --- Private rooms: 4x 2p, 4x 3p, 4x 4p, all created at the same time ---
-  final roomSizes = [2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4];
+  final roomSizes = quick
+      ? [2, 2, 2, 3, 3, 4, 4, 4]
+      : [2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4];
   final privateRooms = <List<Bot>>[];
   for (final size in roomSizes) {
     privateRooms.add([
@@ -205,7 +217,7 @@ Future<void> main(List<String> args) async {
   final allPrivate = privateRooms.expand((r) => r).toList();
   await Future.wait(allPrivate.map((b) => b.connect()));
   final codes = await Future.wait(
-      [for (var i = 0; i < roomSizes.length; i++) privateRooms[i][0].createGame(roomSizes[i])]);
+      [for (var i = 0; i < roomSizes.length; i++) privateRooms[i][0].createGame(roomSizes[i], testMode: quick)]);
   if (codes.toSet().length != codes.length) {
     _violation('duplicate room codes from concurrent create_game: $codes');
   }
@@ -216,8 +228,9 @@ Future<void> main(List<String> args) async {
   print('✅ ${privateRooms.length} private rooms created concurrently: $codes');
 
   // --- Matchmaking: 16 bots want 2p, 8 bots want 4p, all at once ---
-  final mm2 = [for (var i = 0; i < 16; i++) Bot(url, id(), chaos: true)];
-  final mm4 = [for (var i = 0; i < 8; i++) Bot(url, id(), chaos: true)];
+  // Public rooms can't use test mode, so --quick skips matchmaking.
+  final mm2 = [for (var i = 0; i < (quick ? 0 : 16); i++) Bot(url, id(), chaos: true)];
+  final mm4 = [for (var i = 0; i < (quick ? 0 : 8); i++) Bot(url, id(), chaos: true)];
   final mm = [...mm2, ...mm4];
   await Future.wait(mm.map((b) => b.connect()));
   for (final b in mm2) {
@@ -260,7 +273,7 @@ Future<void> main(List<String> args) async {
     for (final b in all.where((b) => b.chaos)) {
       if (_rng.nextDouble() < 0.15) b.misbehave(all);
     }
-    if (tick == 25) {
+    if (tick == (quick ? 3 : 25)) {
       for (final r in rooms.values.toList().asMap().entries.where((e) => e.key.isEven)) {
         final victim = r.value.last;
         dropped.add(victim);
