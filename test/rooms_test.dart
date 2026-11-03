@@ -171,7 +171,7 @@ void main() {
       say(room[0], 'move_token', data: {'tokenId': 0});
       say(room[0], 'move_token', data: {'tokenId': 1});
       clock.elapse(const Duration(seconds: 3));
-      final tokens = (room[0].seat('a')['tokens'] as List).cast<Map>();
+      final tokens = (room[0].seat('a')['tokens'] as List).cast<Map<String, dynamic>>();
       expect(tokens.where((t) => t['isFinished'] == true), hasLength(1));
     });
   });

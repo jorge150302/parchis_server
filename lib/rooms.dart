@@ -74,6 +74,10 @@ class GameRoom {
   final int createdAt = DateTime.now().microsecondsSinceEpoch;
   String get matchId => '$createdAt';
 
+  /// Creation order, strictly increasing (the clock can tie on fast hosts).
+  final int sequence = ++_roomSequence;
+  static int _roomSequence = 0;
+
   /// Tokens each player (by clientId) captured in this match.
   final Map<String, int> captures = {};
 
@@ -303,7 +307,7 @@ GameRoom? _roomToResume(String clientId) {
     if (seat.isEmpty) continue;
     anyMatch ??= room;
     if (seat.first.isAI) continue;
-    if (best == null || room.createdAt > best.createdAt) best = room;
+    if (best == null || room.sequence > best.sequence) best = room;
   }
   return best ?? anyMatch;
 }
