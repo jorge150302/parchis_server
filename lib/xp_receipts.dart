@@ -27,10 +27,10 @@ class DailyUsage {
 class ReceiptBatch {
   final acceptedIds = <String>[];
   final rejected = <String>[];
-  var xp = 0;
-  var matches = 0;
-  var wins = 0;
-  var captures = 0;
+  int xp = 0;
+  int matches = 0;
+  int wins = 0;
+  int captures = 0;
 
   bool get isEmpty => acceptedIds.isEmpty;
 }

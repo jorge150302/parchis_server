@@ -10,19 +10,20 @@ void main() async {
 
   channel.stream.listen((dynamic message) {
     try {
-      final rawMessage = message is List<int> 
-          ? utf8.decode(message) 
-          : message as String;
+      final rawMessage =
+          message is List<int> ? utf8.decode(message) : message as String;
 
       final event = jsonDecode(rawMessage) as Map<String, dynamic>;
       final eventName = event['event'] as String;
-      final data = (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
+      final data =
+          (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
 
       switch (eventName) {
         case 'game_created':
           print('\n🏠 SALA CREADA: ${data['roomCode']}');
         case 'game_joined':
-          print('\n🤝 UNIDO CON ÉXITO. Jugadores en sala: ${data['playerCount']}');
+          print(
+              '\n🤝 UNIDO CON ÉXITO. Jugadores en sala: ${data['playerCount']}');
         case 'game_state':
           print('\n--- TABLERO ---');
           print('Sala: ${data['roomCode']}');
@@ -30,9 +31,12 @@ void main() async {
           for (final p in players) {
             final player = p as Map<String, dynamic>;
             final isMe = player['id'] == myClientId ? ' (YO)' : '';
-            print('👤 [Slot ${player['index']}] ${player['name']} | Pos: ${player['position']} | AI: ${player['isAI']}$isMe');
+            print(
+                '👤 [Slot ${player['index']}] ${player['name']} | Pos: ${player['position']} | AI: ${player['isAI']}$isMe');
           }
-          final turnText = data['currentPlayerId'] == myClientId ? '¡TU TURNO!' : (data['currentPlayerId'] as String);
+          final turnText = data['currentPlayerId'] == myClientId
+              ? '¡TU TURNO!'
+              : (data['currentPlayerId'] as String);
           print('👉 Turno de: $turnText');
         case 'dice_result':
           print('\n🎲 DADO: ${data['diceValue']} (Por: ${data['playerId']})');
@@ -59,31 +63,39 @@ void main() async {
     if (input.isEmpty) return;
 
     if (input == 'create') {
-      channel.sink.add(jsonEncode({
-        'event': 'create_game',
-        'clientId': myClientId,
-        'data': {'name': 'Anfitrión'},
-      }),);
+      channel.sink.add(
+        jsonEncode({
+          'event': 'create_game',
+          'clientId': myClientId,
+          'data': {'name': 'Anfitrión'},
+        }),
+      );
     } else if (input.startsWith('join ')) {
       final parts = input.split(' ');
       if (parts.length < 2) return;
       final code = parts[1];
-      channel.sink.add(jsonEncode({
-        'event': 'join_game',
-        'clientId': myClientId,
-        'data': {'roomCode': code, 'name': 'Tester'},
-      }),);
+      channel.sink.add(
+        jsonEncode({
+          'event': 'join_game',
+          'clientId': myClientId,
+          'data': {'roomCode': code, 'name': 'Tester'},
+        }),
+      );
     } else if (input == 'roll') {
-      channel.sink.add(jsonEncode({
-        'event': 'roll_dice',
-        'clientId': myClientId,
-      }),);
+      channel.sink.add(
+        jsonEncode({
+          'event': 'roll_dice',
+          'clientId': myClientId,
+        }),
+      );
     } else {
-      channel.sink.add(jsonEncode({
-        'event': 'chat_message',
-        'clientId': myClientId,
-        'data': {'message': input},
-      }),);
+      channel.sink.add(
+        jsonEncode({
+          'event': 'chat_message',
+          'clientId': myClientId,
+          'data': {'message': input},
+        }),
+      );
     }
   });
 }

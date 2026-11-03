@@ -51,12 +51,14 @@ class Bot {
   }
 
   void send(String event, [Map<String, dynamic>? data, String? asClientId]) {
-    _add(jsonEncode({
-      'event': event,
-      'clientId': asClientId ?? clientId,
-      'level': 1,
-      'data': data,
-    }));
+    _add(
+      jsonEncode({
+        'event': event,
+        'clientId': asClientId ?? clientId,
+        'level': 1,
+        'data': data,
+      }),
+    );
   }
 
   /// A bot that already closed its socket (left, or is reconnecting) may
@@ -155,14 +157,18 @@ class Bot {
     lastState = s;
     // Progress = any token moved or the turn passed; a room whose key stops
     // changing while not finished is stuck, not just slow.
-    final key = '${s['currentPlayerId']}|' +
-        players.map((p) => (p['tokens'] as List).map((t) => t['position']).join(',')).join(';');
+    final key =
+        '${s['currentPlayerId']}|${players.map((p) => (p['tokens'] as List).map((t) => t['position']).join(',')).join(';')}';
     if (key != _progressKey) {
       _progressKey = key;
       lastProgress = DateTime.now();
     }
-    tokensFinished = players.fold<int>(0, (n, p) =>
-        n + (p['tokens'] as List).where((t) => t['isFinished'] == true).length);
+    tokensFinished = players.fold<int>(
+      0,
+      (n, p) =>
+          n +
+          (p['tokens'] as List).where((t) => t['isFinished'] == true).length,
+    );
     if (s['phase'] == 'finished') gameOver = true;
     if (s['currentPlayerId'] != clientId || _reconnecting) return;
 
@@ -236,7 +242,8 @@ Future<void> _rejoinAfterAbandonScenario(String url, String clientId) async {
   await Future<void>.delayed(const Duration(seconds: 2));
 
   if (again.roomCode != roomB) {
-    _violation('rejoin scenario: resumed into ${again.roomCode}, expected $roomB');
+    _violation(
+        'rejoin scenario: resumed into ${again.roomCode}, expected $roomB');
   } else if (again.statesSeen == before) {
     _violation('rejoin scenario: no game_state after reconnecting to $roomB');
   } else if (again.errors.contains('MATCH_NOT_FOUND')) {
@@ -251,7 +258,9 @@ Future<void> _rejoinAfterAbandonScenario(String url, String clientId) async {
 /// the quitter's seat; in a 2-player room the remaining player wins.
 Future<void> _surrenderScenario(String url, String prefix) async {
   Future<List<Bot>> room(int size, String tag) async {
-    final bots = [for (var i = 0; i < size; i++) Bot(url, '${prefix}_${tag}_$i')];
+    final bots = [
+      for (var i = 0; i < size; i++) Bot(url, '${prefix}_${tag}_$i')
+    ];
     await Future.wait(bots.map((b) => b.connect()));
     final code = await bots[0].createGame(size);
     await Future.wait(bots.skip(1).map((b) => b.joinGame(code)));
@@ -283,7 +292,8 @@ Future<void> _surrenderScenario(String url, String prefix) async {
         '(gameOver=${three[0].gameOver}, errors=${three[0].errors})');
   }
   if (!two[1].surrendered) _violation('surrender (2p): no confirmation');
-  if (!two[0].finished) _violation('surrender (2p): remaining player did not win');
+  if (!two[0].finished)
+    _violation('surrender (2p): remaining player did not win');
   if (_violations.isEmpty) {
     print('✅ surrender: 3p room continues with AI, 2p room awards the win');
   }
@@ -293,7 +303,8 @@ Future<void> _surrenderScenario(String url, String prefix) async {
 Future<void> main(List<String> args) async {
   final quick = args.contains('--quick');
   final positional = args.where((a) => !a.startsWith('--')).toList();
-  final url = positional.isNotEmpty ? positional.first : 'ws://localhost:8099/ws';
+  final url =
+      positional.isNotEmpty ? positional.first : 'ws://localhost:8099/ws';
   final timeLimit =
       Duration(minutes: positional.length > 1 ? int.parse(positional[1]) : 10);
   final sw = Stopwatch()..start();
@@ -306,9 +317,8 @@ Future<void> main(List<String> args) async {
   await _surrenderScenario(url, '${run}_quit');
 
   // --- Private rooms: 4x 2p, 4x 3p, 4x 4p, all created at the same time ---
-  final roomSizes = quick
-      ? [2, 2, 2, 3, 3, 4, 4, 4]
-      : [2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4];
+  final roomSizes =
+      quick ? [2, 2, 2, 3, 3, 4, 4, 4] : [2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4];
   final privateRooms = <List<Bot>>[];
   for (final size in roomSizes) {
     privateRooms.add([
@@ -318,7 +328,11 @@ Future<void> main(List<String> args) async {
   final allPrivate = privateRooms.expand((r) => r).toList();
   await Future.wait(allPrivate.map((b) => b.connect()));
   final codes = await Future.wait(
-      [for (var i = 0; i < roomSizes.length; i++) privateRooms[i][0].createGame(roomSizes[i], testMode: quick)]);
+    [
+      for (var i = 0; i < roomSizes.length; i++)
+        privateRooms[i][0].createGame(roomSizes[i], testMode: quick)
+    ],
+  );
   if (codes.toSet().length != codes.length) {
     _violation('duplicate room codes from concurrent create_game: $codes');
   }
@@ -330,8 +344,12 @@ Future<void> main(List<String> args) async {
 
   // --- Matchmaking: 16 bots want 2p, 8 bots want 4p, all at once ---
   // Public rooms can't use test mode, so --quick skips matchmaking.
-  final mm2 = [for (var i = 0; i < (quick ? 0 : 16); i++) Bot(url, id(), chaos: true)];
-  final mm4 = [for (var i = 0; i < (quick ? 0 : 8); i++) Bot(url, id(), chaos: true)];
+  final mm2 = [
+    for (var i = 0; i < (quick ? 0 : 16); i++) Bot(url, id(), chaos: true)
+  ];
+  final mm4 = [
+    for (var i = 0; i < (quick ? 0 : 8); i++) Bot(url, id(), chaos: true)
+  ];
   final mm = [...mm2, ...mm4];
   await Future.wait(mm.map((b) => b.connect()));
   for (final b in mm2) {
@@ -360,7 +378,8 @@ Future<void> main(List<String> args) async {
   for (final e in rooms.entries) {
     final size = e.value.first.lastState?['maxPlayers'];
     if (e.value.length != size) {
-      _violation('room ${e.key} has ${e.value.length} bots but maxPlayers $size');
+      _violation(
+          'room ${e.key} has ${e.value.length} bots but maxPlayers $size');
     }
   }
   print('✅ matchmaking seated ${mm.length} bots into '
@@ -375,21 +394,23 @@ Future<void> main(List<String> args) async {
       if (_rng.nextDouble() < 0.15) b.misbehave(all);
     }
     if (tick == (quick ? 3 : 25)) {
-      for (final r in rooms.values.toList().asMap().entries.where((e) => e.key.isEven)) {
+      for (final r
+          in rooms.values.toList().asMap().entries.where((e) => e.key.isEven)) {
         final victim = r.value.last;
         dropped.add(victim);
         unawaited(victim.dropAndReconnect(const Duration(seconds: 4)));
       }
       print('🔌 dropped & reconnecting ${dropped.length} bots mid-game');
     }
-
   });
 
   // Wait until every room reaches `finished` or time runs out.
   while (sw.elapsed < timeLimit) {
     await Future<void>.delayed(const Duration(seconds: 5));
-    final open = byRoom().entries.where((e) => !e.value.any((b) => b.gameOver)).length;
-    print('  ${sw.elapsed.inSeconds}s: ${rooms.length - open}/${rooms.length} rooms finished');
+    final open =
+        byRoom().entries.where((e) => !e.value.any((b) => b.gameOver)).length;
+    print(
+        '  ${sw.elapsed.inSeconds}s: ${rooms.length - open}/${rooms.length} rooms finished');
     if (open == 0) break;
   }
   chaosTimer.cancel();
@@ -412,14 +433,18 @@ Future<void> main(List<String> args) async {
     }
   }
   for (final b in dropped) {
-    if (b.errors.contains('MATCH_NOT_FOUND') || b.errors.contains('CANNOT_REJOIN')) {
+    if (b.errors.contains('MATCH_NOT_FOUND') ||
+        b.errors.contains('CANNOT_REJOIN')) {
       _violation('${b.clientId} could not resume after reconnect: ${b.errors}');
     }
   }
-  final unfinished = finalRooms.entries.where((e) => !e.value.any((b) => b.gameOver));
+  final unfinished =
+      finalRooms.entries.where((e) => !e.value.any((b) => b.gameOver));
   final now = DateTime.now();
   for (final e in unfinished) {
-    final last = e.value.map((b) => b.lastProgress).reduce((a, b) => a.isAfter(b) ? a : b);
+    final last = e.value
+        .map((b) => b.lastProgress)
+        .reduce((a, b) => a.isAfter(b) ? a : b);
     final idle = now.difference(last).inSeconds;
     final done = e.value.first.tokensFinished;
     final total = e.value.length * 2;
@@ -427,11 +452,13 @@ Future<void> main(List<String> args) async {
       _violation('room ${e.key} STUCK: no movement for ${idle}s '
           '(phase ${e.value.first.lastState?['phase']}, $done/$total tokens home)');
     } else {
-      print('⏳ room ${e.key} still playing (${e.value.length}p, $done/$total tokens home, '
+      print(
+          '⏳ room ${e.key} still playing (${e.value.length}p, $done/$total tokens home, '
           'last move ${idle}s ago) — slow, not stuck');
     }
   }
-  final mismatches = all.fold<int>(0, (s, b) => s + b.errors.where((c) => c == 'CLIENT_MISMATCH').length);
+  final mismatches = all.fold<int>(
+      0, (s, b) => s + b.errors.where((c) => c == 'CLIENT_MISMATCH').length);
 
   // Server still alive and responsive?
   final probe = Bot(url, 'probe');
@@ -439,7 +466,8 @@ Future<void> main(List<String> args) async {
   probe.send('ping');
   await Future<void>.delayed(const Duration(seconds: 1));
   if (probe.pongs == 0) _violation('server stopped answering ping');
-  final http = await HttpClient().getUrl(Uri.parse(url.replaceFirst('ws', 'http').replaceFirst('/ws', '/')));
+  final http = await HttpClient().getUrl(
+      Uri.parse(url.replaceFirst('ws', 'http').replaceFirst('/ws', '/')));
   final res = await http.close();
   if (res.statusCode != 200) _violation('GET / returned ${res.statusCode}');
 
@@ -448,8 +476,9 @@ Future<void> main(List<String> args) async {
   // Leak check: once every bot is gone, the server must release all rooms,
   // sockets and timers (90 s reconnection grace + cleanup, so allow 4 min).
   final healthUrl = Uri.parse(
-      url.replaceFirst('ws', 'http').replaceFirst(RegExp(r'/ws$'), '/health'));
-  Map<String, dynamic> health = {};
+    url.replaceFirst('ws', 'http').replaceFirst(RegExp(r'/ws$'), '/health'),
+  );
+  var health = <String, dynamic>{};
   final leakDeadline = DateTime.now().add(const Duration(minutes: 4));
   while (DateTime.now().isBefore(leakDeadline)) {
     final req = await HttpClient().getUrl(healthUrl);
@@ -473,6 +502,8 @@ Future<void> main(List<String> args) async {
       'game_states: ${all.fold<int>(0, (s, b) => s + b.statesSeen)}');
   print('spoof attempts rejected (CLIENT_MISMATCH): $mismatches');
   print('reconnected mid-game: ${dropped.length}');
-  print(_violations.isEmpty ? '✅ NO VIOLATIONS' : '❌ ${_violations.length} VIOLATIONS');
+  print(_violations.isEmpty
+      ? '✅ NO VIOLATIONS'
+      : '❌ ${_violations.length} VIOLATIONS');
   exit(_violations.isEmpty ? 0 : 1);
 }

@@ -5,7 +5,6 @@ import 'package:parchis_server/models/board_action.dart';
 enum CellType { normal, action }
 
 class Cell {
-
   Cell({
     required this.number,
     this.type = CellType.normal,

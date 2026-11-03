@@ -21,8 +21,8 @@ Map<String, Object?> _receipt(
       'match': match,
       'win': win,
       'captures': captures,
-      'timestamp': (at ?? _now.subtract(const Duration(minutes: 5)))
-          .toIso8601String(),
+      'timestamp':
+          (at ?? _now.subtract(const Duration(minutes: 5))).toIso8601String(),
     };
 
 ReceiptBatch _validate(
@@ -30,8 +30,12 @@ ReceiptBatch _validate(
   Set<String> processed = const {},
   DailyUsage today = const DailyUsage(),
 }) =>
-    validateReceipts(receipts,
-        now: _now, alreadyProcessed: processed, today: today);
+    validateReceipts(
+      receipts,
+      now: _now,
+      alreadyProcessed: processed,
+      today: today,
+    );
 
 void main() {
   group('levels', () {
@@ -66,7 +70,12 @@ void main() {
   group('MatchResult', () {
     test('winner gets XP, a win and a played match', () {
       final r = MatchResult(
-          uid: 'u', matchId: 'm', position: 0, totalPlayers: 4, captures: 3);
+        uid: 'u',
+        matchId: 'm',
+        position: 0,
+        totalPlayers: 4,
+        captures: 3,
+      );
       final update = r.profileUpdate(90);
       expect(r.xp, 100);
       expect(update['xp'], 190);
@@ -78,7 +87,11 @@ void main() {
 
     test('surrender counts as played with no XP and no win', () {
       final r = MatchResult(
-          uid: 'u', matchId: 'm', totalPlayers: 2, captures: 1);
+        uid: 'u',
+        matchId: 'm',
+        totalPlayers: 2,
+        captures: 1,
+      );
       final update = r.profileUpdate(500);
       expect(r.xp, 0);
       expect(update['xp'], 500);

@@ -4,15 +4,16 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:meta/meta.dart';
+import 'package:parchis_server/firebase_admin.dart' as admin
+    show testModeAllowed;
 import 'package:parchis_server/firebase_admin.dart';
-import 'package:parchis_server/firebase_admin.dart' as admin show testModeAllowed;
 import 'package:parchis_server/game_engine.dart';
-import 'package:parchis_server/match_results.dart';
-import 'package:parchis_server/server_stats.dart';
 import 'package:parchis_server/logic/board_generator.dart';
 import 'package:parchis_server/logic/board_presets.dart';
+import 'package:parchis_server/match_results.dart';
 import 'package:parchis_server/models/board_action.dart';
 import 'package:parchis_server/models/player.dart';
+import 'package:parchis_server/server_stats.dart';
 
 /// A connected client as the room logic sees it. Production wraps a
 /// WebSocket (routes/ws.dart); tests use an in-memory fake.
@@ -54,7 +55,8 @@ RoomServices roomServices = RoomServices.production();
 // --- Clases de Soporte ---
 
 class GameRoom {
-  GameRoom(this.code, this.engine, this.maxPlayers, {this.isPublic = false, this.testMode = false});
+  GameRoom(this.code, this.engine, this.maxPlayers,
+      {this.isPublic = false, this.testMode = false});
 
   final String code;
   final GameEngine engine;
@@ -62,7 +64,7 @@ class GameRoom {
   bool isPublic;
   final bool testMode;
   final Map<String, ClientConnection> clients = {}; // clientId → channel
-  final Map<String, String> playerUids = {};        // clientId → Firebase UID
+  final Map<String, String> playerUids = {}; // clientId → Firebase UID
   bool hadMultipleHumans = false;
 
   /// Players the server switched to auto-play because they disconnected (as
@@ -166,7 +168,8 @@ final Map<String, String> _uidSessions = {};
 /// Errors go to stderr so the host's log collector sees them; a failing
 /// handler must never be silent.
 void _logError(String where, Object error, [StackTrace? stack]) {
-  stderr.writeln('[${DateTime.now().toUtc().toIso8601String()}] ERROR $where: $error');
+  stderr.writeln(
+      '[${DateTime.now().toUtc().toIso8601String()}] ERROR $where: $error');
   if (stack != null) stderr.writeln(stack);
 }
 
@@ -245,12 +248,14 @@ void _recordResult(GameRoom room, Player player, String uid, {int? position}) {
     totalPlayers: room.engine.players.length,
     captures: room.captures[player.id] ?? 0,
   );
-  unawaited(recordMatchResult(getAdminFirestore(), result).catchError(
-    (Object e, StackTrace st) {
-      _logError('recordMatchResult $uid', e, st);
-      return false;
-    },
-  ));
+  unawaited(
+    recordMatchResult(getAdminFirestore(), result).catchError(
+      (Object e, StackTrace st) {
+        _logError('recordMatchResult $uid', e, st);
+        return false;
+      },
+    ),
+  );
 }
 
 /// Resolves the Firebase UID from [idToken], stores it in the room, and writes
@@ -271,27 +276,30 @@ Future<void> _storeUidAndSetActiveMatch(
 /// Sends `you_finished` to the player's channel and clears their active_match_id.
 /// Safe to call multiple times — removes the UID on first call so subsequent
 /// calls are no-ops.
-void _notifyAndClearPlayerFinish(String roomCode, Player player, {bool silent = false, String? reason}) {
+void _notifyAndClearPlayerFinish(String roomCode, Player player,
+    {bool silent = false, String? reason}) {
   final room = _rooms[roomCode];
   if (room == null) return;
   final rank = room.engine.finishedPlayers.indexOf(player) + 1;
   final totalPlayers = room.engine.players.length;
   final channel = room.clients[player.id];
   final uid = room.playerUids.remove(player.id);
-  channel?.send(jsonEncode({
-    'event': 'you_finished',
-    'data': {
-      'position': rank,
-      'totalPlayers': totalPlayers,
-      'silent': silent,
-      'reason': reason,
-      // What the server credits to the account; the client shows this
-      // instead of computing XP itself. 0 for guests (nothing is stored).
-      'xpAwarded': uid == null
-          ? 0
-          : onlineMatchXp(position: rank - 1, totalPlayers: totalPlayers),
-    },
-  }));
+  channel?.send(
+    jsonEncode({
+      'event': 'you_finished',
+      'data': {
+        'position': rank,
+        'totalPlayers': totalPlayers,
+        'silent': silent,
+        'reason': reason,
+        // What the server credits to the account; the client shows this
+        // instead of computing XP itself. 0 for guests (nothing is stored).
+        'xpAwarded': uid == null
+            ? 0
+            : onlineMatchXp(position: rank - 1, totalPlayers: totalPlayers),
+      },
+    }),
+  );
   if (uid != null) _recordResult(room, player, uid, position: rank - 1);
 }
 
@@ -333,23 +341,24 @@ void _checkAndCleanupRoom(String roomCode) {
   if (humansRemaining.length == 1 && room.hadMultipleHumans) {
     final lastPlayerId = humansRemaining.first;
     final player = room.engine.players.firstWhere((p) => p.id == lastPlayerId);
-    
+
     if (!player.isFinished) {
       // Mark as winner silently on the server state
       for (final t in player.tokens) {
         t.position = -1;
         t.isFinished = true;
       }
-      
+
       // Ensure they are in the winners list for correct rank and state
       if (!room.engine.finishedPlayers.contains(player)) {
         room.engine.finishedPlayers.add(player);
       }
-      
-      _notifyAndClearPlayerFinish(roomCode, player, silent: true, reason: 'abandonment');
+
+      _notifyAndClearPlayerFinish(roomCode, player,
+          silent: true, reason: 'abandonment');
       room.engine.phase = GamePhase.finished;
       _broadcastGameState(roomCode);
-      
+
       // Schedule cleanup
       Timer(const Duration(seconds: 30), () => _closeRoom(room));
       return;
@@ -517,7 +526,8 @@ void handleClientDisconnect(ClientConnection channel) {
 }
 
 /// Handles one raw message received on [channel].
-Future<void> handleClientMessage(ClientConnection channel, dynamic message) async {
+Future<void> handleClientMessage(
+    ClientConnection channel, dynamic message) async {
   // Malformed client input is answered, not logged: logging it would
   // let any client flood the server log.
   final event = _parseClientMessage(message);
@@ -559,9 +569,11 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
       if (syncUid != null) {
         final existingClientId = _uidSessions[syncUid];
         if (existingClientId != null && existingClientId != clientId) {
-          _sendError(channel,
-              'Hay otro dispositivo conectado a esta cuenta.',
-              code: 'SESSION_CONFLICT');
+          _sendError(
+            channel,
+            'Hay otro dispositivo conectado a esta cuenta.',
+            code: 'SESSION_CONFLICT',
+          );
           return;
         }
         _uidSessions[syncUid] = clientId;
@@ -573,18 +585,25 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
       final userRoom = _roomToResume(clientId);
 
       if (userRoom != null) {
-        final player = userRoom.engine.players.firstWhere((p) => p.id == clientId);
+        final player =
+            userRoom.engine.players.firstWhere((p) => p.id == clientId);
         // clientIds are broadcast to every player, so knowing one is not
         // proof of owning the seat: require the same Firebase account.
         final seatUid = userRoom.playerUids[clientId];
         if (seatUid != null && seatUid != syncUid) {
-          _sendError(channel, 'No puedes unirte a esta partida.',
-              code: 'CANNOT_REJOIN');
+          _sendError(
+            channel,
+            'No puedes unirte a esta partida.',
+            code: 'CANNOT_REJOIN',
+          );
           return;
         }
         if (player.isAI) {
-          _sendError(channel, 'No se encontró una partida activa para este ID.',
-              code: 'MATCH_NOT_FOUND');
+          _sendError(
+            channel,
+            'No se encontró una partida activa para este ID.',
+            code: 'MATCH_NOT_FOUND',
+          );
           return;
         }
 
@@ -598,7 +617,9 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
         if (oldChannel != null && oldChannel != channel) {
           _channelToPlayer.remove(oldChannel);
           _channelToRoom.remove(oldChannel);
-          try { oldChannel.close(); } catch (_) {}
+          try {
+            oldChannel.close();
+          } catch (_) {}
         }
 
         userRoom.clients[clientId] = channel;
@@ -610,8 +631,11 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
           userRoom.startTimer(() => _handleTimeout(userRoom.code));
         }
       } else {
-        _sendError(channel, 'No se encontró una partida activa para este ID.',
-            code: 'MATCH_NOT_FOUND');
+        _sendError(
+          channel,
+          'No se encontró una partida activa para este ID.',
+          code: 'MATCH_NOT_FOUND',
+        );
       }
       return;
     }
@@ -628,8 +652,14 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
           reportedId != clientId &&
           room.engine.players.any((p) => p.id == reportedId)) {
         unawaited(_storeReport(room, clientId, reportedId, reason));
-        channel.send(jsonEncode(
-            {'event': 'report_received', 'data': {'message': 'Reporte registrado.'}}));
+        channel.send(
+          jsonEncode(
+            {
+              'event': 'report_received',
+              'data': {'message': 'Reporte registrado.'}
+            },
+          ),
+        );
       }
       return;
     }
@@ -647,9 +677,11 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
       if (uid != null) {
         final existingClientId = _uidSessions[uid];
         if (existingClientId != null && existingClientId != clientId) {
-          _sendError(channel,
-              'Hay otro dispositivo conectado a esta cuenta.',
-              code: 'SESSION_CONFLICT');
+          _sendError(
+            channel,
+            'Hay otro dispositivo conectado a esta cuenta.',
+            code: 'SESSION_CONFLICT',
+          );
           return;
         }
         _uidSessions[uid] = clientId;
@@ -657,15 +689,19 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
       return;
     }
 
-    if (eventName == 'find_match' || eventName == 'create_game' || eventName == 'join_game') {
+    if (eventName == 'find_match' ||
+        eventName == 'create_game' ||
+        eventName == 'join_game') {
       final uid = await roomServices.uidFromToken(idToken);
       if (uid != null) {
         // Single-session enforcement: reject second device.
         final existingClientId = _uidSessions[uid];
         if (existingClientId != null && existingClientId != clientId) {
-          _sendError(channel,
-              'Hay otro dispositivo conectado a esta cuenta.',
-              code: 'SESSION_CONFLICT');
+          _sendError(
+            channel,
+            'Hay otro dispositivo conectado a esta cuenta.',
+            code: 'SESSION_CONFLICT',
+          );
           return;
         }
         // Register this device as the active session for this account.
@@ -678,14 +714,16 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
               _rooms.containsKey(roomCode) &&
               _rooms[roomCode]!.playerUids.values.contains(uid);
           if (roomStillActive) {
-            channel.send(jsonEncode({
-              'event': 'error',
-              'data': {
-                'code': 'ALREADY_IN_GAME',
-                'message': 'Ya estás en una partida activa.',
-                'roomCode': roomCode,
-              },
-            }));
+            channel.send(
+              jsonEncode({
+                'event': 'error',
+                'data': {
+                  'code': 'ALREADY_IN_GAME',
+                  'message': 'Ya estás en una partida activa.',
+                  'roomCode': roomCode,
+                },
+              }),
+            );
             return;
           }
           _activeUids.remove(uid);
@@ -712,8 +750,16 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
         }
       }
       if (foundRoom != null) {
-        _joinToRoom(channel, foundRoom, clientId, data['name'] as String?,
-            level, avatarType, avatarIconId, idToken);
+        _joinToRoom(
+          channel,
+          foundRoom,
+          clientId,
+          data['name'] as String?,
+          level,
+          avatarType,
+          avatarIconId,
+          idToken,
+        );
       } else {
         // Si no hay salas, creamos una pública automáticamente para esperar a otros
         _createAndJoinRoom(
@@ -733,13 +779,18 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
       }
       // Test rooms let their members force dice, so they are only
       // available when the operator allows them and are never public.
-      final testMode =
-          roomServices.testModeAllowed && ((data['testMode'] as bool?) ?? false);
+      final testMode = roomServices.testModeAllowed &&
+          ((data['testMode'] as bool?) ?? false);
       _createAndJoinRoom(
-        channel, clientId, data['name'] as String?,
+        channel,
+        clientId,
+        data['name'] as String?,
         _clampMaxPlayers(data['maxPlayers']),
         !testMode && ((data['isPublic'] as bool?) ?? false),
-        level, avatarType, avatarIconId, idToken,
+        level,
+        avatarType,
+        avatarIconId,
+        idToken,
         testMode: testMode,
       );
     }
@@ -751,14 +802,26 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
       }
       final room = _rooms[data['roomCode'] ?? ''];
       final seatUid = room?.playerUids[clientId];
-      if (seatUid != null && seatUid != await roomServices.uidFromToken(idToken)) {
-        _sendError(channel, 'No puedes unirte a esta partida.',
-            code: 'CANNOT_REJOIN');
+      if (seatUid != null &&
+          seatUid != await roomServices.uidFromToken(idToken)) {
+        _sendError(
+          channel,
+          'No puedes unirte a esta partida.',
+          code: 'CANNOT_REJOIN',
+        );
         return;
       }
       if (room != null) {
-        _joinToRoom(channel, room, clientId, data['name'] as String?,
-            level, avatarType, avatarIconId, idToken);
+        _joinToRoom(
+          channel,
+          room,
+          clientId,
+          data['name'] as String?,
+          level,
+          avatarType,
+          avatarIconId,
+          idToken,
+        );
       } else {
         _sendError(channel, 'La sala no existe.');
       }
@@ -781,8 +844,13 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
     if (eventName == 'move_token') {
       _updatePlayerLevel(clientId, level);
       final tokenId = data['tokenId'] as int?;
-      if (tokenId != null) unawaited(_handleMoveToken(channel, tokenId).catchError(
-    (Object e, StackTrace st) => _logError('move_token', e, st)));
+      if (tokenId != null) {
+        unawaited(
+          _handleMoveToken(channel, tokenId).catchError(
+            (Object e, StackTrace st) => _logError('move_token', e, st),
+          ),
+        );
+      }
     }
 
     if (eventName == 'skip_turn') {
@@ -796,7 +864,9 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
           room.engine.currentPlayer.id == _channelToPlayer[channel] &&
           room.engine.phase == GamePhase.choosingToken &&
           !room.engine.canMoveAnyToken(
-              room.engine.currentPlayer, room.engine.lastDiceValue)) {
+            room.engine.currentPlayer,
+            room.engine.lastDiceValue,
+          )) {
         _moveToNextTurnWithSkips(roomCode!);
       }
     }
@@ -866,7 +936,8 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
       if (uid != null) _recordResult(room, player, uid);
 
       // Confirm surrender to the leaving player.
-      channel.send(jsonEncode({'event': 'surrendered', 'data': <String, dynamic>{}}));
+      channel.send(
+          jsonEncode({'event': 'surrendered', 'data': <String, dynamic>{}}));
 
       // Convert to AI so the game continues.
       player.isAI = true;
@@ -875,12 +946,15 @@ Future<void> handleClientMessage(ClientConnection channel, dynamic message) asyn
       _channelToPlayer.remove(channel);
       _channelToRoom.remove(channel);
 
-      room.broadcast({'event': 'game_event', 'data': {
-        'message': 'player_surrendered_msg',
-        'playerId': player.id,
-        'type': 'penalty',
-        'args': {'name': player.name},
-      }});
+      room.broadcast({
+        'event': 'game_event',
+        'data': {
+          'message': 'player_surrendered_msg',
+          'playerId': player.id,
+          'type': 'penalty',
+          'args': {'name': player.name},
+        },
+      });
       _broadcastGameState(roomCode);
       _checkAndCleanupRoom(roomCode);
       return;
@@ -961,8 +1035,8 @@ Map<String, GameRoom> get roomsForTest => _rooms;
 
 void _updatePlayerLevel(String clientId, int level) {
   for (final room in _rooms.values) {
-    final player = room.engine.players
-        .firstWhere((p) => p.id == clientId, orElse: () => Player(id: '', name: ''));
+    final player = room.engine.players.firstWhere((p) => p.id == clientId,
+        orElse: () => Player(id: '', name: ''));
     if (player.id.isNotEmpty) {
       player.level = level;
       break;
@@ -986,8 +1060,7 @@ String _newRoomCode() {
 }
 
 /// Parchís seats 2–4 players; anything else from the client falls back into range.
-int _clampMaxPlayers(Object? value) =>
-    ((value is int) ? value : 2).clamp(2, 4);
+int _clampMaxPlayers(Object? value) => ((value is int) ? value : 2).clamp(2, 4);
 
 void _createAndJoinRoom(
   ClientConnection channel,
@@ -1002,9 +1075,11 @@ void _createAndJoinRoom(
   bool testMode = false,
 }) {
   final roomCode = _newRoomCode();
-  final board = generateBoard(classicActionPositions, classicActions, totalCells: 100);
+  final board =
+      generateBoard(classicActionPositions, classicActions, totalCells: 100);
   final engine = GameEngine(board: board, players: []);
-  final room = GameRoom(roomCode, engine, maxPlayers, isPublic: isPublic, testMode: testMode);
+  final room = GameRoom(roomCode, engine, maxPlayers,
+      isPublic: isPublic, testMode: testMode);
   _rooms[roomCode] = room;
 
   final newPlayer = Player(
@@ -1027,7 +1102,10 @@ void _createAndJoinRoom(
     if (room.testMode) _applyTestMode(room);
   }
 
-  channel.send(jsonEncode({'event': 'game_created', 'data': {'roomCode': roomCode}}));
+  channel.send(jsonEncode({
+    'event': 'game_created',
+    'data': {'roomCode': roomCode}
+  }));
   _broadcastGameState(roomCode);
 
   room.startLobbyTimeoutTimer(() {
@@ -1052,12 +1130,14 @@ void _joinToRoom(
   String? avatarIconId,
   String? idToken,
 ) {
-  final existingPlayerIndex = room.engine.players.indexWhere((p) => p.id == clientId);
+  final existingPlayerIndex =
+      room.engine.players.indexWhere((p) => p.id == clientId);
   if (existingPlayerIndex != -1) {
     final player = room.engine.players[existingPlayerIndex];
     // Surrendered or grace-period-expired → permanently AI. Block rejoin.
     if (player.isAI) {
-      _sendError(channel, 'No puedes unirte a esta partida.', code: 'CANNOT_REJOIN');
+      _sendError(channel, 'No puedes unirte a esta partida.',
+          code: 'CANNOT_REJOIN');
       return;
     }
     // Reconnection path — cancel grace timer and restore player.
@@ -1065,7 +1145,8 @@ void _joinToRoom(
     _reconnectionTimers.remove(clientId);
     player.isAI = false;
     player.isConnected = true;
-    if (room.autoPlayFromDisconnect.remove(clientId)) player.isAutoPlaying = false;
+    if (room.autoPlayFromDisconnect.remove(clientId))
+      player.isAutoPlaying = false;
     player.level = level;
     player.avatarType = avatarType;
     player.avatarIconId = avatarIconId;
@@ -1074,22 +1155,29 @@ void _joinToRoom(
     if (oldChannel != null && oldChannel != channel) {
       _channelToPlayer.remove(oldChannel);
       _channelToRoom.remove(oldChannel);
-      try { oldChannel.close(); } catch (_) {}
+      try {
+        oldChannel.close();
+      } catch (_) {}
     }
     room.clients[clientId] = channel;
     _channelToPlayer[channel] = clientId;
     _channelToRoom[channel] = room.code;
     // Refresh UID in case it was missing (e.g. server restart).
     unawaited(_storeUidAndSetActiveMatch(room, clientId, idToken, room.code));
-    channel.send(jsonEncode({'event': 'game_joined', 'data': {'reconnected': true}}));
+    channel.send(jsonEncode({
+      'event': 'game_joined',
+      'data': {'reconnected': true}
+    }));
     _broadcastGameState(room.code);
-    if (room.engine.currentPlayer.id == clientId && room.engine.phase != GamePhase.idle) {
+    if (room.engine.currentPlayer.id == clientId &&
+        room.engine.phase != GamePhase.idle) {
       room.startTimer(() => _handleTimeout(room.code));
     }
     return;
   }
 
-  if (room.engine.phase != GamePhase.idle || room.engine.players.length >= room.maxPlayers) {
+  if (room.engine.phase != GamePhase.idle ||
+      room.engine.players.length >= room.maxPlayers) {
     _sendError(channel, 'Sala no disponible.');
     return;
   }
@@ -1117,11 +1205,15 @@ void _joinToRoom(
   }
 
   channel.send(
-      jsonEncode({'event': 'game_joined', 'data': {
+    jsonEncode({
+      'event': 'game_joined',
+      'data': {
         'roomCode': room.code,
         'playerCount': room.engine.players.length,
         'maxPlayers': room.maxPlayers,
-      }}));
+      },
+    }),
+  );
   _broadcastGameState(room.code);
 
   if (gameJustStarted) {
@@ -1133,7 +1225,8 @@ void _joinToRoom(
   }
 }
 
-void _handleRollDice(ClientConnection? channel, {String? roomCode, String? playerId}) {
+void _handleRollDice(ClientConnection? channel,
+    {String? roomCode, String? playerId}) {
   final rCode = roomCode ?? (channel != null ? _channelToRoom[channel] : null);
   final pId = playerId ?? (channel != null ? _channelToPlayer[channel] : null);
   if (rCode == null || pId == null) return;
@@ -1144,11 +1237,11 @@ void _handleRollDice(ClientConnection? channel, {String? roomCode, String? playe
     room.stopTimer();
 
     final diceValue = (room.testMode && room.forcedDice != null)
-        ? () { 
-            final v = room.forcedDice!; 
-            room.forcedDice = null; 
+        ? () {
+            final v = room.forcedDice!;
+            room.forcedDice = null;
             room.engine.lastDiceValue = v; // ✅ Sincronizar con el engine
-            return v; 
+            return v;
           }()
         : room.engine.rollDice();
     room.engine.currentPlayer.lastDiceValue = diceValue;
@@ -1158,20 +1251,25 @@ void _handleRollDice(ClientConnection? channel, {String? roomCode, String? playe
     room.engine.registerSix(room.engine.currentPlayer, diceValue);
     if (room.engine.currentPlayer.consecutiveSixes >= 3) {
       room.engine.penaltyThreeSixes(room.engine.currentPlayer);
-      _broadcastGameEvent(rCode, '${room.engine.currentPlayer.name} sacó tres 6.');
+      _broadcastGameEvent(
+          rCode, '${room.engine.currentPlayer.name} sacó tres 6.');
       _moveToNextTurnWithSkips(rCode);
-    } else if (room.engine.canMoveAnyToken(room.engine.currentPlayer, diceValue)) {
+    } else if (room.engine
+        .canMoveAnyToken(room.engine.currentPlayer, diceValue)) {
       room.engine.phase = GamePhase.choosingToken;
       _broadcastGameState(rCode);
       room.startTimer(() => _handleTimeout(rCode));
     } else {
       if (diceValue == 6) {
-        room.broadcast({'event': 'game_event', 'data': {
-          'message': 'player_cant_move',
-          'playerId': room.engine.currentPlayer.id,
-          'type': 'penalty',
-          'args': {'name': room.engine.currentPlayer.name},
-        }});
+        room.broadcast({
+          'event': 'game_event',
+          'data': {
+            'message': 'player_cant_move',
+            'playerId': room.engine.currentPlayer.id,
+            'type': 'penalty',
+            'args': {'name': room.engine.currentPlayer.name},
+          },
+        });
         room.engine.phase = GamePhase.rolling;
         _broadcastGameState(rCode);
         room.startTimer(() => _handleTimeout(rCode));
@@ -1182,8 +1280,12 @@ void _handleRollDice(ClientConnection? channel, {String? roomCode, String? playe
   }
 }
 
-Future<void> _handleMoveToken(ClientConnection? channel, int tokenId,
-    {String? roomCode, String? playerId}) async {
+Future<void> _handleMoveToken(
+  ClientConnection? channel,
+  int tokenId, {
+  String? roomCode,
+  String? playerId,
+}) async {
   final rCode = roomCode ?? (channel != null ? _channelToRoom[channel] : null);
   final pId = playerId ?? (channel != null ? _channelToPlayer[channel] : null);
   if (rCode == null || pId == null) return;
@@ -1215,11 +1317,14 @@ Future<void> _handleMoveToken(ClientConnection? channel, int tokenId,
 
   // Broadcast intermediate position so clients can animate step-by-step.
   if (!token.isFinished) {
-    room.broadcast({'event': 'token_stepped', 'data': {
-      'playerId': room.engine.currentPlayer.id,
-      'tokenId': tokenId,
-      'position': token.position,
-    }});
+    room.broadcast({
+      'event': 'token_stepped',
+      'data': {
+        'playerId': room.engine.currentPlayer.id,
+        'tokenId': tokenId,
+        'position': token.position,
+      },
+    });
   }
 
   // Wait for step animation on clients (200ms per step + 300ms buffer).
@@ -1232,14 +1337,16 @@ Future<void> _handleMoveToken(ClientConnection? channel, int tokenId,
     cellAction = room.engine.board.getCell(token.position).action;
   }
 
-  bool bonusSent = false;
+  var bonusSent = false;
 
   // skipTurn + dice-6 exception: cancel both effects instead of applying either.
-  final bool skipTurnDice6 = cellAction?.type == BoardActionType.skipTurn && diceValue == 6;
+  final skipTurnDice6 =
+      cellAction?.type == BoardActionType.skipTurn && diceValue == 6;
   if (!skipTurnDice6) {
     room.engine.applyCellAction(room.engine.currentPlayer, token);
     if (cellAction != null) {
-      _broadcastCellActionEvent(rCode, room.engine.currentPlayer, token, cellAction);
+      _broadcastCellActionEvent(
+          rCode, room.engine.currentPlayer, token, cellAction);
       if (cellAction.type == BoardActionType.rollAgain) {
         bonusSent = true;
       }
@@ -1252,15 +1359,18 @@ Future<void> _handleMoveToken(ClientConnection? channel, int tokenId,
     room.captures[room.engine.currentPlayer.id] =
         (room.captures[room.engine.currentPlayer.id] ?? 0) + 1;
     // room.engine.currentPlayer.extraTurns++ ya se hace en resolveCollisions del motor
-    room.broadcast({'event': 'game_event', 'data': {
-      'message': 'captured_player',
-      'playerId': room.engine.currentPlayer.id,
-      'type': 'bonus',
-      'args': {
-        'name': room.engine.currentPlayer.name,
-        'other': capturedPlayer.name,
+    room.broadcast({
+      'event': 'game_event',
+      'data': {
+        'message': 'captured_player',
+        'playerId': room.engine.currentPlayer.id,
+        'type': 'bonus',
+        'args': {
+          'name': room.engine.currentPlayer.name,
+          'other': capturedPlayer.name,
+        },
       },
-    }});
+    });
   }
 
   // Si sacó un 6 y no cayó en casilla de saltar turno, gana un turno extra natural
@@ -1279,12 +1389,15 @@ Future<void> _handleMoveToken(ClientConnection? channel, int tokenId,
     // Solo enviamos 'extra_turn' si no hemos enviado ya un mensaje de bonus específico
     // o si aún quedan más turnos extra acumulados (ej: sacó un 6 Y capturó).
     if (!bonusSent || room.engine.currentPlayer.extraTurns > 0) {
-      room.broadcast({'event': 'game_event', 'data': {
-        'message': 'extra_turn',
-        'playerId': room.engine.currentPlayer.id,
-        'type': 'bonus',
-        'args': {'name': room.engine.currentPlayer.name},
-      }});
+      room.broadcast({
+        'event': 'game_event',
+        'data': {
+          'message': 'extra_turn',
+          'playerId': room.engine.currentPlayer.id,
+          'type': 'bonus',
+          'args': {'name': room.engine.currentPlayer.name},
+        },
+      });
     }
 
     room.engine.phase = GamePhase.rolling;
@@ -1306,20 +1419,29 @@ void _handleTimeout(String roomCode) {
   }
 
   if (room.engine.phase == GamePhase.rolling) {
-    _handleRollDice(null, roomCode: roomCode, playerId: room.engine.currentPlayer.id);
+    _handleRollDice(null,
+        roomCode: roomCode, playerId: room.engine.currentPlayer.id);
   } else if (room.engine.phase == GamePhase.choosingToken) {
     Token? best;
     var max = -1;
     for (final t in room.engine.currentPlayer.tokens) {
-      if (room.engine.canMove(t, room.engine.lastDiceValue) && t.position > max) {
+      if (room.engine.canMove(t, room.engine.lastDiceValue) &&
+          t.position > max) {
         max = t.position;
         best = t;
       }
     }
     if (best != null) {
-      unawaited(_handleMoveToken(null, best.id,
-          roomCode: roomCode, playerId: room.engine.currentPlayer.id).catchError(
-          (Object e, StackTrace st) => _logError('move_token', e, st)));
+      unawaited(
+        _handleMoveToken(
+          null,
+          best.id,
+          roomCode: roomCode,
+          playerId: room.engine.currentPlayer.id,
+        ).catchError(
+          (Object e, StackTrace st) => _logError('move_token', e, st),
+        ),
+      );
     } else {
       _moveToNextTurnWithSkips(roomCode);
     }
@@ -1333,9 +1455,10 @@ void _moveToNextTurnWithSkips(String roomCode) {
 
   // --- Compensación Silenciosa de Penalizaciones ---
   // Si TODOS los jugadores activos tienen al menos un salto de turno pendiente,
-  // les restamos uno a todos silenciosamente para evitar ráfagas de mensajes 
+  // les restamos uno a todos silenciosamente para evitar ráfagas de mensajes
   // y permitir que el juego fluya si todos están en la misma situación.
-  final activePlayers = room.engine.players.where((p) => !p.isFinished).toList();
+  final activePlayers =
+      room.engine.players.where((p) => !p.isFinished).toList();
   if (activePlayers.isNotEmpty && activePlayers.every((p) => p.mustSkipTurn)) {
     for (final p in activePlayers) {
       p.consumeSkip();
@@ -1349,12 +1472,15 @@ void _moveToNextTurnWithSkips(String roomCode) {
     if (room.engine.currentPlayer.mustSkipTurn) {
       final skipped = room.engine.currentPlayer;
       skipped.consumeSkip();
-      room.broadcast({'event': 'game_event', 'data': {
-        'message': 'skip_turn_msg',
-        'playerId': skipped.id,
-        'type': 'penalty',
-        'args': {'name': skipped.name},
-      }});
+      room.broadcast({
+        'event': 'game_event',
+        'data': {
+          'message': 'skip_turn_msg',
+          'playerId': skipped.id,
+          'type': 'penalty',
+          'args': {'name': skipped.name},
+        },
+      });
       skip = true;
     } else {
       skip = false;
@@ -1380,15 +1506,18 @@ void _moveToNextTurnWithSkips(String roomCode) {
 
 // --- Helpers de broadcast ---
 
-void _broadcastGameEvent(String r, String m) =>
-    _rooms[r]?.broadcast({'event': 'game_event', 'data': {'message': m}});
+void _broadcastGameEvent(String r, String m) => _rooms[r]?.broadcast({
+      'event': 'game_event',
+      'data': {'message': m}
+    });
 
-void _broadcastCellActionEvent(String roomCode, Player player, Token token, BoardAction action) {
+void _broadcastCellActionEvent(
+    String roomCode, Player player, Token token, BoardAction action) {
   final room = _rooms[roomCode];
   if (room == null) return;
   String msgKey;
   String type;
-  final Map<String, String> args = {'name': player.name};
+  final args = <String, String>{'name': player.name};
   switch (action.type) {
     case BoardActionType.goToStart:
       msgKey = 'bad_luck_home';
@@ -1402,7 +1531,9 @@ void _broadcastCellActionEvent(String roomCode, Player player, Token token, Boar
     case BoardActionType.moveTo:
       msgKey = 'cell_action_move_to';
       type = 'move';
-      args['cell'] = token.isFinished ? '${room.engine.board.finalPosition}' : '${action.targetNumber}';
+      args['cell'] = token.isFinished
+          ? '${room.engine.board.finalPosition}'
+          : '${action.targetNumber}';
   }
   room.broadcast({
     'event': 'game_event',
@@ -1414,10 +1545,16 @@ void _broadcastCellActionEvent(String roomCode, Player player, Token token, Boar
     },
   });
 }
-void _broadcastDiceResult(String r, int v, String p) =>
-    _rooms[r]?.broadcast({'event': 'dice_result', 'data': {'diceValue': v, 'playerId': p}});
+
+void _broadcastDiceResult(String r, int v, String p) => _rooms[r]?.broadcast({
+      'event': 'dice_result',
+      'data': {'diceValue': v, 'playerId': p}
+    });
 void _sendError(ClientConnection c, String m, {String? code}) =>
-    c.send(jsonEncode({'event': 'error', 'data': {'message': m, 'code': code}}));
+    c.send(jsonEncode({
+      'event': 'error',
+      'data': {'message': m, 'code': code}
+    }));
 
 void _broadcastGameState(String roomCode) {
   final room = _rooms[roomCode];

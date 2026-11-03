@@ -70,9 +70,9 @@ class MatchResult {
     return {
       'xp': newXp,
       'level': levelForXp(newXp),
-      'matches_played': FieldValue.increment(1),
+      'matches_played': const FieldValue.increment(1),
       'tokens_capture': FieldValue.increment(captures),
-      if (isWin) 'wins': FieldValue.increment(1),
+      if (isWin) 'wins': const FieldValue.increment(1),
       'active_match_id': null,
       'updated_at': Timestamp.now(),
     };
@@ -96,7 +96,7 @@ Future<bool> recordMatchResult(Firestore db, MatchResult result) {
     if (user.exists) {
       txn.update(userRef, update);
     } else {
-      txn.set(userRef, update, options: SetOptions.merge());
+      txn.set(userRef, update, options: const SetOptions.merge());
     }
     txn.set(resultRef, {
       'position': result.position,

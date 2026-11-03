@@ -1,7 +1,6 @@
 // Contenido actualizado para parchis_server/lib/models/player.dart
 
 class Token {
-
   Token({
     required this.id,
     this.position = 0,
@@ -24,7 +23,6 @@ class Token {
 }
 
 class Player {
-
   Player({
     required this.id,
     required this.name,

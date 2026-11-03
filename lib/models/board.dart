@@ -3,7 +3,6 @@
 import 'package:parchis_server/models/cell.dart';
 
 class Board {
-
   Board(this.cells);
   final List<Cell> cells;
 

@@ -19,8 +19,10 @@ class FakeConnection implements ClientConnection {
   @override
   void close() => closed = true;
 
-  List<Map<String, dynamic>> events(String name) =>
-      [for (final e in received) if (e['event'] == name) e];
+  List<Map<String, dynamic>> events(String name) => [
+        for (final e in received)
+          if (e['event'] == name) e
+      ];
 
   Map<String, dynamic>? last(String name) {
     final list = events(name);
@@ -75,8 +77,12 @@ void main() {
     );
     final code = conns.first.last('game_created')!['roomCode'] as String;
     for (final c in conns.skip(1)) {
-      say(c, 'join_game',
-          data: {'roomCode': code}, token: withTokens ? c.clientId : null);
+      say(
+        c,
+        'join_game',
+        data: {'roomCode': code},
+        token: withTokens ? c.clientId : null,
+      );
     }
     return conns;
   }
@@ -106,7 +112,7 @@ void main() {
       final room = startRoom(['a', 'b']);
       for (final c in room) {
         expect(c.state!['phase'], 'rolling');
-        expect((c.state!['players'] as List), hasLength(2));
+        expect(c.state!['players'] as List, hasLength(2));
       }
       expect(room[0].state!['currentPlayerId'], 'a');
       expect(room[0].last('game_created')!['roomCode'], matches(r'^\d{5}$'));
@@ -171,7 +177,8 @@ void main() {
       say(room[0], 'move_token', data: {'tokenId': 0});
       say(room[0], 'move_token', data: {'tokenId': 1});
       clock.elapse(const Duration(seconds: 3));
-      final tokens = (room[0].seat('a')['tokens'] as List).cast<Map<String, dynamic>>();
+      final tokens =
+          (room[0].seat('a')['tokens'] as List).cast<Map<String, dynamic>>();
       expect(tokens.where((t) => t['isFinished'] == true), hasLength(1));
     });
   });
@@ -190,7 +197,8 @@ void main() {
     });
   });
 
-  test('after the grace period the AI takes the seat and the last human wins', () {
+  test('after the grace period the AI takes the seat and the last human wins',
+      () {
     run(() {
       final room = startRoom(['a', 'b']);
       handleClientDisconnect(room[1]);

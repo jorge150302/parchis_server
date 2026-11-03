@@ -55,7 +55,7 @@ void main() {
       expect(engine.finishedPlayers.map((p) => p.id), ['p0', 'p1']);
     });
 
-    test('resets the outgoing player\'s consecutive sixes', () {
+    test("resets the outgoing player's consecutive sixes", () {
       final engine = _engine();
       engine.registerSix(engine.currentPlayer, 6);
       engine.registerSix(engine.currentPlayer, 6);
@@ -94,14 +94,14 @@ void main() {
 
   group('canMove', () {
     test('requires an exact roll to reach the goal', () {
-      final engine = _engine(cells: 20);
+      final engine = _engine();
       final t = engine.currentPlayer.tokens[0]..position = 17;
       expect(engine.canMove(t, 3), isTrue);
       expect(engine.canMove(t, 4), isFalse);
     });
 
     test('cannot pass or land on a bridge', () {
-      final engine = _engine(cells: 20);
+      final engine = _engine();
       for (final t in engine.players[1].tokens) {
         t.position = 5;
       }
@@ -205,8 +205,8 @@ void main() {
   group('classic preset', () {
     test('every action position fits the 100-cell board', () {
       expect(classicActionPositions.length, classicActions.length);
-      final board =
-          generateBoard(classicActionPositions, classicActions, totalCells: 100);
+      final board = generateBoard(classicActionPositions, classicActions,
+          totalCells: 100);
       for (final pos in classicActionPositions) {
         expect(board.getCell(pos).hasAction, isTrue, reason: 'cell $pos');
       }

@@ -2,7 +2,8 @@
 
 enum BoardActionType { goToStart, moveTo, skipTurn, rollAgain }
 
-class BoardAction { // solo para moveTo
+class BoardAction {
+  // solo para moveTo
 
   BoardAction.goToStart()
       : type = BoardActionType.goToStart,

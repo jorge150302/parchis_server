@@ -6,9 +6,7 @@ Response onRequest(RequestContext context) {
   final isSpanish = langParam == 'es' ||
       (langParam == null && acceptLang.toLowerCase().contains('es'));
 
-  final date = isSpanish
-      ? '13 de mayo de 2026'
-      : 'May 13, 2026';
+  final date = isSpanish ? '13 de mayo de 2026' : 'May 13, 2026';
 
   final html = isSpanish ? _htmlSpanish(date) : _htmlEnglish(date);
 

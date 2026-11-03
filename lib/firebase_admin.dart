@@ -3,7 +3,8 @@ import 'dart:io';
 
 import 'package:firebase_admin_sdk/auth.dart';
 import 'package:firebase_admin_sdk/firebase_admin_sdk.dart';
-import 'package:google_cloud_firestore/google_cloud_firestore.dart' show Firestore;
+import 'package:google_cloud_firestore/google_cloud_firestore.dart'
+    show Firestore;
 
 FirebaseApp? _adminApp;
 

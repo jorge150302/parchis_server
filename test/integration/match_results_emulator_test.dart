@@ -13,7 +13,8 @@ import 'package:test/test.dart';
 void main() {
   final emulator = Platform.environment['FIRESTORE_EMULATOR_HOST'];
   if (emulator == null) {
-    test('Firestore emulator tests', () {}, skip: 'FIRESTORE_EMULATOR_HOST not set');
+    test('Firestore emulator tests', () {},
+        skip: 'FIRESTORE_EMULATOR_HOST not set');
     return;
   }
 
@@ -28,7 +29,12 @@ void main() {
     final id = uid();
     await db.collection('users').doc(id).set({'xp': 90, 'level': 1});
     final result = MatchResult(
-        uid: id, matchId: 'room_1', position: 0, totalPlayers: 4, captures: 2);
+      uid: id,
+      matchId: 'room_1',
+      position: 0,
+      totalPlayers: 4,
+      captures: 2,
+    );
 
     expect(await recordMatchResult(db, result), isTrue);
     expect(await recordMatchResult(db, result), isFalse);
@@ -45,7 +51,12 @@ void main() {
   test('concurrent duplicate results still count once', () async {
     final id = uid();
     final result = MatchResult(
-        uid: id, matchId: 'room_2', position: 1, totalPlayers: 2, captures: 0);
+      uid: id,
+      matchId: 'room_2',
+      position: 1,
+      totalPlayers: 2,
+      captures: 0,
+    );
     await Future.wait([
       for (var i = 0; i < 5; i++) recordMatchResult(db, result),
     ]);
@@ -57,7 +68,9 @@ void main() {
   test('a surrender counts as played without XP', () async {
     final id = uid();
     await recordMatchResult(
-        db, MatchResult(uid: id, matchId: 'room_3', totalPlayers: 3, captures: 1));
+      db,
+      MatchResult(uid: id, matchId: 'room_3', totalPlayers: 3, captures: 1),
+    );
     final p = await profile(id);
     expect(p['xp'], 0);
     expect(p['matches_played'], 1);

@@ -107,7 +107,8 @@ Future<Response> onRequest(RequestContext context) async {
         'offline_xp_today': today.xp + batch.xp,
         'offline_matches_today': today.matches + batch.matches,
         'updated_at': Timestamp.now(),
-        if (batch.matches > 0) 'matches_played': FieldValue.increment(batch.matches),
+        if (batch.matches > 0)
+          'matches_played': FieldValue.increment(batch.matches),
         if (batch.wins > 0) 'wins': FieldValue.increment(batch.wins),
         if (batch.captures > 0)
           'tokens_capture': FieldValue.increment(batch.captures),
@@ -115,7 +116,7 @@ Future<Response> onRequest(RequestContext context) async {
       if (user.exists) {
         txn.update(userRef, update);
       } else {
-        txn.set(userRef, update, options: SetOptions.merge());
+        txn.set(userRef, update, options: const SetOptions.merge());
       }
       for (final id in batch.acceptedIds) {
         txn.set(userRef.collection('xp_receipts').doc(id), {
@@ -139,7 +140,8 @@ Future<Response> onRequest(RequestContext context) async {
       'xp_applied': batch.xp,
       'accepted': batch.acceptedIds.length,
       'rejected': batch.rejected,
-      'message': batch.isEmpty ? 'No valid XP to apply' : 'XP synced successfully',
+      'message':
+          batch.isEmpty ? 'No valid XP to apply' : 'XP synced successfully',
     }),
   );
 }
