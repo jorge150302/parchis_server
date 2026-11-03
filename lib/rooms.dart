@@ -5,7 +5,7 @@ import 'dart:math';
 
 import 'package:meta/meta.dart';
 import 'package:parchis_server/firebase_admin.dart' as admin
-    show testModeAllowed;
+    show minClientBuild, testModeAllowed;
 import 'package:parchis_server/firebase_admin.dart';
 import 'package:parchis_server/game_engine.dart';
 import 'package:parchis_server/logic/board_generator.dart';
@@ -29,6 +29,7 @@ class RoomServices {
     required this.verifyToken,
     required this.persistence,
     required this.testModeAllowed,
+    this.minClientBuild = 0,
   });
 
   /// Firebase Auth + Firestore, driven by the server configuration.
@@ -37,6 +38,7 @@ class RoomServices {
         verifyToken: verifyIdToken,
         persistence: isAdminConfigured,
         testModeAllowed: admin.testModeAllowed,
+        minClientBuild: admin.minClientBuild,
       );
 
   /// The verified Firebase UID for an ID token, or `null`.
@@ -48,6 +50,9 @@ class RoomServices {
   /// Whether results and sessions are written to Firestore.
   final bool persistence;
   final bool testModeAllowed;
+
+  /// Apps reporting an older `build` are told to update; 0 accepts any.
+  final int minClientBuild;
 }
 
 RoomServices roomServices = RoomServices.production();
@@ -418,7 +423,8 @@ Map<String, dynamic>? _parseClientMessage(dynamic message) {
       !optional<int>('level') ||
       !optional<String>('avatarType') ||
       !optional<String>('avatarIconId') ||
-      !optional<String>('idToken')) {
+      !optional<String>('idToken') ||
+      !optional<int>('build')) {
     return null;
   }
   return map;
@@ -546,6 +552,15 @@ Future<void> handleClientMessage(
 
     if (eventName == 'ping') {
       channel.send(jsonEncode({'event': 'pong'}));
+      return;
+    }
+
+    // Apps that predate `build` count as 0, so they are cut off too once a
+    // minimum is set.
+    final build = event['build'] as int? ?? 0;
+    if (build < roomServices.minClientBuild) {
+      _sendError(channel, 'Actualiza la app para seguir jugando.',
+          code: 'UPDATE_REQUIRED');
       return;
     }
 

@@ -96,6 +96,11 @@ bool get devAuthBypass =>
 bool get testModeAllowed =>
     Platform.environment['PARCHIS_ALLOW_TEST_MODE'] == 'true';
 
+/// Oldest app build allowed to play (`PARCHIS_MIN_CLIENT_BUILD`); 0 = any.
+/// Raise it when a protocol change would break older apps.
+int get minClientBuild =>
+    int.tryParse(Platform.environment['PARCHIS_MIN_CLIENT_BUILD'] ?? '') ?? 0;
+
 /// Verifies [idToken] against Firebase Auth.
 ///
 /// Returns `true` if valid. Returns `false` if the token is invalid/expired.

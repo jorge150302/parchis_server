@@ -32,6 +32,7 @@ El servidor escuchará en el puerto **8080**.
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | Contenido JSON de la cuenta de servicio de Firebase (recomendado en producción: como secreto del hosting). |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Alternativa: ruta al archivo de la cuenta de servicio. Si ninguna está definida, se usa `service_account.json` en la carpeta actual. |
 | `PORT` | Puerto (por defecto 8080). |
+| `PARCHIS_MIN_CLIENT_BUILD` | Build mínimo de la app (el `+N` de `version` en pubspec). Las apps más viejas reciben `UPDATE_REQUIRED` y se les pide actualizar. Por defecto 0 (acepta todas). |
 | `PARCHIS_DEV_AUTH_BYPASS=true` | Sin credenciales de Firebase, acepta conexiones sin verificar el token de Firebase. **Solo desarrollo local.** Si falta el archivo y no se define, el servidor rechaza a todos. |
 | `PARCHIS_ALLOW_TEST_MODE=true` | Permite salas `testMode` (dados forzados con `debug_set_dice`). Siempre privadas. **Nunca en producción.** |
 

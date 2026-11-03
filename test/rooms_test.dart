@@ -49,6 +49,7 @@ void main() {
     Map<String, dynamic>? data,
     String? asId,
     String? token,
+    int? build,
   }) {
     handleClientMessage(
       conn,
@@ -57,6 +58,7 @@ void main() {
         'clientId': asId ?? conn.clientId,
         'data': data,
         if (token != null) 'idToken': token,
+        if (build != null) 'build': build,
       }),
     );
     clock.flushMicrotasks();
@@ -294,6 +296,42 @@ void main() {
         (room[0].seat('a')['tokens'] as List).every((t) => t['position'] == 0),
         isTrue,
       );
+    });
+  });
+
+  group('minimum app build', () {
+    RoomServices withMinimum(int build) => RoomServices(
+          uidFromToken: (_) async => null,
+          verifyToken: (_) async => true,
+          persistence: false,
+          testModeAllowed: false,
+          minClientBuild: build,
+        );
+
+    test('is off by default: any build, or none, can play', () {
+      run(() {
+        final c = FakeConnection('a');
+        say(c, 'create_game', data: {'maxPlayers': 2});
+        expect(c.events('game_created'), hasLength(1));
+      });
+    });
+
+    test('older or unversioned apps are told to update; ping still works', () {
+      run(() {
+        roomServices = withMinimum(5);
+        final old = FakeConnection('old');
+        say(old, 'create_game', data: {'maxPlayers': 2}, build: 4);
+        final legacy = FakeConnection('legacy');
+        say(legacy, 'create_game', data: {'maxPlayers': 2});
+        final current = FakeConnection('new');
+        say(current, 'create_game', data: {'maxPlayers': 2}, build: 5);
+
+        expect(old.errorCodes, ['UPDATE_REQUIRED']);
+        expect(legacy.errorCodes, ['UPDATE_REQUIRED']);
+        expect(current.events('game_created'), hasLength(1));
+        say(old, 'ping');
+        expect(old.events('pong'), hasLength(1));
+      });
     });
   });
 }
