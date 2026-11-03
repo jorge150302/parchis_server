@@ -3,11 +3,11 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import 'package:google_cloud_firestore/google_cloud_firestore.dart' show FieldValue;
 import 'package:dart_frog/dart_frog.dart';
 import 'package:dart_frog_web_socket/dart_frog_web_socket.dart';
 import 'package:parchis_server/firebase_admin.dart';
 import 'package:parchis_server/game_engine.dart';
+import 'package:parchis_server/match_results.dart';
 import 'package:parchis_server/server_stats.dart';
 import 'package:parchis_server/logic/board_generator.dart';
 import 'package:parchis_server/logic/board_presets.dart';
@@ -27,6 +27,14 @@ class GameRoom {
   final Map<String, WebSocketChannel> clients = {}; // clientId → channel
   final Map<String, String> playerUids = {};        // clientId → Firebase UID
   bool hadMultipleHumans = false;
+
+  /// Unique per room lifetime (codes are reused): idempotency key for the
+  /// results this match writes to Firestore.
+  final int createdAt = DateTime.now().microsecondsSinceEpoch;
+  String get matchId => '$createdAt';
+
+  /// Tokens each player (by clientId) captured in this match.
+  final Map<String, int> captures = {};
 
   Timer? turnTimer;
   Timer? maxDurationTimer;
@@ -103,8 +111,6 @@ final Map<String, GameRoom> _rooms = {};
 final Map<WebSocketChannel, String> _channelToPlayer = {};
 final Map<WebSocketChannel, String> _channelToRoom = {};
 final Map<String, Timer> _reconnectionTimers = {};
-final Map<String, Map<String, dynamic>> _userDatabase = {};
-final List<Map<String, dynamic>> _playerReports = [];
 // UID → roomCode — updated synchronously so multi-device checks are race-free.
 final Map<String, String> _activeUids = {};
 // UID → clientId — enforces single session per account.
@@ -146,18 +152,60 @@ Future<void> _clearActiveMatch(String uid) async {
   }
 }
 
-/// Records an abandoned match (grace period expiry) — increments matches_played.
-Future<void> _recordMatchAbandoned(String uid) async {
+const _maxReportReasonLength = 64;
+
+/// Persists a player report for moderation (`player_reports`, server-only).
+Future<void> _storeReport(
+  GameRoom room,
+  String reporterId,
+  String reportedId,
+  String reason,
+) async {
+  final report = {
+    'room_code': room.code,
+    'match_id': room.matchId,
+    'reporter_id': reporterId,
+    'reporter_uid': room.playerUids[reporterId],
+    'reported_id': reportedId,
+    'reported_uid': room.playerUids[reportedId],
+    'reported_name':
+        room.engine.players.firstWhere((p) => p.id == reportedId).name,
+    'reason': reason.length > _maxReportReasonLength
+        ? reason.substring(0, _maxReportReasonLength)
+        : reason,
+    'created_at': DateTime.now().toUtc().toIso8601String(),
+  };
+  if (!isAdminConfigured) {
+    stderr.writeln('[report] $report');
+    return;
+  }
+  try {
+    await getAdminFirestore().collection('player_reports').add(report);
+  } catch (e, st) {
+    _logError('store report', e, st);
+  }
+}
+
+/// Writes the server-decided outcome of [player]'s match (XP, win, match
+/// played, captures) to their profile, once per match. [position] is the
+/// 0-based rank, or `null` for a surrender / abandoned match (counts as
+/// played, no XP).
+void _recordResult(GameRoom room, Player player, String uid, {int? position}) {
   _activeUids.remove(uid);
   if (!isAdminConfigured) return;
-  try {
-    await getAdminFirestore().collection('users').doc(uid).update({
-      'matches_played': const FieldValue.increment(1),
-      'active_match_id': null,
-    });
-  } catch (e) {
-    _logError('_recordMatchAbandoned', e);
-  }
+  final result = MatchResult(
+    uid: uid,
+    matchId: '${room.code}_${room.matchId}',
+    position: position,
+    totalPlayers: room.engine.players.length,
+    captures: room.captures[player.id] ?? 0,
+  );
+  unawaited(recordMatchResult(getAdminFirestore(), result).catchError(
+    (Object e, StackTrace st) {
+      _logError('recordMatchResult $uid', e, st);
+      return false;
+    },
+  ));
 }
 
 /// Resolves the Firebase UID from [idToken], stores it in the room, and writes
@@ -183,18 +231,41 @@ void _notifyAndClearPlayerFinish(String roomCode, Player player, {bool silent = 
   final room = _rooms[roomCode];
   if (room == null) return;
   final rank = room.engine.finishedPlayers.indexOf(player) + 1;
+  final totalPlayers = room.engine.players.length;
   final channel = room.clients[player.id];
+  final uid = room.playerUids.remove(player.id);
   channel?.sink.add(jsonEncode({
     'event': 'you_finished',
     'data': {
       'position': rank,
-      'totalPlayers': room.engine.players.length,
+      'totalPlayers': totalPlayers,
       'silent': silent,
       'reason': reason,
+      // What the server credits to the account; the client shows this
+      // instead of computing XP itself. 0 for guests (nothing is stored).
+      'xpAwarded': uid == null
+          ? 0
+          : onlineMatchXp(position: rank - 1, totalPlayers: totalPlayers),
     },
   }));
-  final uid = room.playerUids.remove(player.id);
-  if (uid != null) unawaited(_clearActiveMatch(uid));
+  if (uid != null) _recordResult(room, player, uid, position: rank - 1);
+}
+
+/// The room a reconnecting [clientId] belongs to. The same device can still
+/// appear in older rooms (taken over by the AI after it left, or still in its
+/// grace period), so pick the newest room where it is a human; fall back to
+/// any room containing it so the caller can report it as AI-controlled.
+GameRoom? _roomToResume(String clientId) {
+  GameRoom? best;
+  GameRoom? anyMatch;
+  for (final room in _rooms.values) {
+    final seat = room.engine.players.where((p) => p.id == clientId);
+    if (seat.isEmpty) continue;
+    anyMatch ??= room;
+    if (seat.first.isAI) continue;
+    if (best == null || room.createdAt > best.createdAt) best = room;
+  }
+  return best ?? anyMatch;
 }
 
 /// Closes and removes a room if no human players remain (all AI or finished).
@@ -267,6 +338,32 @@ void _closeRoom(GameRoom room, {String? errorCode}) {
 }
 
 // --- WebSocket handler ---
+
+/// The decoded message if its envelope has the expected types (`event`
+/// string; optional `data` map, `clientId`/`avatarType`/`avatarIconId`/
+/// `idToken` strings, `level` int), else `null`.
+Map<String, dynamic>? _parseClientMessage(dynamic message) {
+  if (message is! String) return null;
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(message);
+  } on FormatException {
+    return null;
+  }
+  if (decoded is! Map<String, dynamic>) return null;
+  final map = decoded;
+  bool optional<T>(String key) => map[key] == null || map[key] is T;
+  if (map['event'] is! String ||
+      !optional<Map<String, dynamic>>('data') ||
+      !optional<String>('clientId') ||
+      !optional<int>('level') ||
+      !optional<String>('avatarType') ||
+      !optional<String>('avatarIconId') ||
+      !optional<String>('idToken')) {
+    return null;
+  }
+  return map;
+}
 
 var _statsRegistered = false;
 
@@ -341,7 +438,7 @@ Future<Response> onRequest(RequestContext context) async {
                 _broadcastGameState(roomCode);
                 // Clear active_match_id and count the abandoned match.
                 final uid = room.playerUids.remove(playerId);
-                if (uid != null) unawaited(_recordMatchAbandoned(uid));
+                if (uid != null) _recordResult(room, p, uid);
                 _checkAndCleanupRoom(roomCode);
               }
               _reconnectionTimers.remove(playerId);
@@ -372,8 +469,14 @@ Future<Response> onRequest(RequestContext context) async {
 
     channel.stream.listen(
       (dynamic message) async {
+        // Malformed client input is answered, not logged: logging it would
+        // let any client flood the server log.
+        final event = _parseClientMessage(message);
+        if (event == null) {
+          _sendError(channel, 'Mensaje inválido.', code: 'BAD_MESSAGE');
+          return;
+        }
         try {
-          final event = jsonDecode(message as String) as Map<String, dynamic>;
           final eventName = event['event'] as String;
           final data = (event['data'] ?? <String, dynamic>{}) as Map<String, dynamic>;
           final clientId = event['clientId'] as String?;
@@ -418,13 +521,7 @@ Future<Response> onRequest(RequestContext context) async {
             _reconnectionTimers[clientId]?.cancel();
             _reconnectionTimers.remove(clientId);
 
-            GameRoom? userRoom;
-            for (final room in _rooms.values) {
-              if (room.engine.players.any((p) => p.id == clientId)) {
-                userRoom = room;
-                break;
-              }
-            }
+            final userRoom = _roomToResume(clientId);
 
             if (userRoom != null) {
               final player = userRoom.engine.players.firstWhere((p) => p.id == clientId);
@@ -458,7 +555,7 @@ Future<Response> onRequest(RequestContext context) async {
               _broadcastGameState(userRoom.code);
               if (userRoom.engine.currentPlayer.id == clientId &&
                   userRoom.engine.phase != GamePhase.idle) {
-                userRoom.startTimer(() => _handleTimeout(userRoom!.code));
+                userRoom.startTimer(() => _handleTimeout(userRoom.code));
               }
             } else {
               _sendError(channel, 'No se encontró una partida activa para este ID.',
@@ -468,25 +565,27 @@ Future<Response> onRequest(RequestContext context) async {
           }
 
           if (eventName == 'report_player') {
-            final reportedId = data['reportedId'] as String?;
-            final reason = data['reason'] as String?;
-            if (reportedId != null && reason != null) {
-              _playerReports.add({
-                'reporterId': clientId,
-                'reportedId': reportedId,
-                'reason': reason,
-                'timestamp': data['timestamp'] ?? DateTime.now().toIso8601String(),
-              });
+            final reportedId = data['reportedId'];
+            final reason = data['reason'];
+            final roomCode = _channelToRoom[channel];
+            final room = roomCode != null ? _rooms[roomCode] : null;
+            // Only reports about someone you are actually playing with.
+            if (room != null &&
+                reportedId is String &&
+                reason is String &&
+                reportedId != clientId &&
+                room.engine.players.any((p) => p.id == reportedId)) {
+              unawaited(_storeReport(room, clientId, reportedId, reason));
               channel.sink.add(jsonEncode(
                   {'event': 'report_received', 'data': {'message': 'Reporte registrado.'}}));
             }
             return;
           }
 
+          // The app deletes the account itself (Auth + Firestore); here we
+          // only drop the device's in-memory session.
           if (eventName == 'delete_user_data') {
-            _userDatabase.remove(data['playerId'] ?? clientId);
-            channel.sink.add(jsonEncode(
-                {'event': 'user_data_deleted', 'data': {'message': 'Datos eliminados.'}}));
+            _uidSessions.removeWhere((_, cId) => cId == clientId);
             return;
           }
 
@@ -709,9 +808,10 @@ Future<Response> onRequest(RequestContext context) async {
             );
             if (player.id.isEmpty || player.isFinished) return;
 
-            // Clear active_match_id immediately.
+            // Surrender counts as a played match with no XP; this also
+            // clears active_match_id.
             final uid = room.playerUids.remove(player.id);
-            if (uid != null) unawaited(_clearActiveMatch(uid));
+            if (uid != null) _recordResult(room, player, uid);
 
             // Confirm surrender to the leaving player.
             channel.sink.add(jsonEncode({'event': 'surrendered', 'data': <String, dynamic>{}}));
@@ -1073,6 +1173,8 @@ Future<void> _handleMoveToken(WebSocketChannel? channel, int tokenId,
   final capturedPlayers = room.engine.resolveCollisions(token);
   if (capturedPlayers.isNotEmpty) bonusSent = true;
   for (final capturedPlayer in capturedPlayers) {
+    room.captures[room.engine.currentPlayer.id] =
+        (room.captures[room.engine.currentPlayer.id] ?? 0) + 1;
     // room.engine.currentPlayer.extraTurns++ ya se hace en resolveCollisions del motor
     room.broadcast({'event': 'game_event', 'data': {
       'message': 'captured_player',

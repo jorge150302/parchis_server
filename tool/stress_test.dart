@@ -50,7 +50,7 @@ class Bot {
   }
 
   void send(String event, [Map<String, dynamic>? data, String? asClientId]) {
-    _ws?.add(jsonEncode({
+    _add(jsonEncode({
       'event': event,
       'clientId': asClientId ?? clientId,
       'level': 1,
@@ -58,7 +58,17 @@ class Bot {
     }));
   }
 
-  void sendRaw(String raw) => _ws?.add(raw);
+  /// A bot that already closed its socket (left, or is reconnecting) may
+  /// still react to a buffered message; that send is simply dropped.
+  void _add(String message) {
+    try {
+      _ws?.add(message);
+    } on StateError {
+      // sink closed
+    }
+  }
+
+  void sendRaw(String raw) => _add(raw);
 
   Future<String> createGame(int maxPlayers, {bool testMode = false}) {
     send('create_game', {
@@ -194,6 +204,45 @@ class Bot {
   Future<void> close() async => _ws?.close();
 }
 
+/// A device that left room A (still in its grace period, or already replaced
+/// by the AI) and then joined room B must be resumed into B on reconnect, not
+/// into A. Regression for request_sync picking the first room containing the
+/// clientId.
+Future<void> _rejoinAfterAbandonScenario(String url, String clientId) async {
+  Future<Bot> seat(Bot host, String fillerId) async {
+    final filler = Bot(url, fillerId);
+    await Future.wait([host.connect(), filler.connect()]);
+    final code = await host.createGame(2);
+    await filler.joinGame(code);
+    return filler;
+  }
+
+  final first = Bot(url, clientId);
+  final fillerA = await seat(first, '${clientId}_fa');
+  final roomA = first.roomCode;
+  await first.close(); // leaves A mid-game; A keeps the seat for 90 s
+
+  final again = Bot(url, clientId);
+  final fillerB = await seat(again, '${clientId}_fb');
+  final roomB = again.roomCode;
+  await Future<void>.delayed(const Duration(seconds: 1));
+
+  final before = again.statesSeen;
+  await again.dropAndReconnect(const Duration(milliseconds: 500));
+  await Future<void>.delayed(const Duration(seconds: 2));
+
+  if (again.roomCode != roomB) {
+    _violation('rejoin scenario: resumed into ${again.roomCode}, expected $roomB');
+  } else if (again.statesSeen == before) {
+    _violation('rejoin scenario: no game_state after reconnecting to $roomB');
+  } else if (again.errors.contains('MATCH_NOT_FOUND')) {
+    _violation('rejoin scenario: got MATCH_NOT_FOUND although $roomB is live');
+  } else {
+    print('✅ rejoin after abandoning $roomA resumed into $roomB');
+  }
+  await Future.wait([fillerA.close(), fillerB.close(), again.close()]);
+}
+
 Future<void> main(List<String> args) async {
   final quick = args.contains('--quick');
   final positional = args.where((a) => !a.startsWith('--')).toList();
@@ -201,8 +250,12 @@ Future<void> main(List<String> args) async {
   final timeLimit =
       Duration(minutes: positional.length > 1 ? int.parse(positional[1]) : 10);
   final sw = Stopwatch()..start();
+  // Unique per run so rooms left over from a previous run can't interfere.
+  final run = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
   var n = 0;
-  String id() => 'bot${n++}';
+  String id() => '${run}_bot${n++}';
+
+  await _rejoinAfterAbandonScenario(url, '${run}_rejoin');
 
   // --- Private rooms: 4x 2p, 4x 3p, 4x 4p, all created at the same time ---
   final roomSizes = quick

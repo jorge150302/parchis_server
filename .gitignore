@@ -23,3 +23,4 @@ Thumbs.db
 
 # Firebase service account — NEVER commit this file
 service_account.json
+node_modules/

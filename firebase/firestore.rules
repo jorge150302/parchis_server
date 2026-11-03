@@ -1,0 +1,56 @@
+rules_version = '2';
+
+// The app may only manage cosmetic profile fields. XP, level and match stats
+// are written by the server (Admin SDK, which bypasses these rules): online
+// results when a match ends, offline ones through /xp_sync.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // Fields the app itself may change on its own profile.
+    function cosmeticOnly() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['display_name', 'photo_url', 'avatar_type',
+                  'avatar_icon_id', 'updated_at', 'active_match_id']);
+    }
+
+    // The app may clear a stale active match, never set one.
+    function activeMatchClearedOrUnchanged() {
+      return !('active_match_id' in request.resource.data)
+        || request.resource.data.active_match_id == null
+        || request.resource.data.active_match_id == resource.data.get('active_match_id', null);
+    }
+
+    function startsFromZero() {
+      let d = request.resource.data;
+      return d.get('xp', 0) == 0
+        && d.get('level', 1) == 1
+        && d.get('wins', 0) == 0
+        && d.get('matches_played', 0) == 0
+        && d.get('tokens_capture', 0) == 0
+        && !('active_match_id' in d);
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid) && startsFromZero();
+      allow update: if isOwner(uid) && cosmeticOnly()
+                    && activeMatchClearedOrUnchanged();
+      allow delete: if isOwner(uid);
+
+      // Server-written history (match results, processed XP receipts).
+      // Owners may read it and delete it when deleting their account.
+      match /{sub}/{doc} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
