@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:fake_async/fake_async.dart';
+import 'package:parchis_server/entitlements.dart';
 import 'package:parchis_server/rooms.dart';
 import 'package:parchis_server/server_stats.dart';
 import 'package:test/test.dart';
@@ -332,6 +333,38 @@ void main() {
         say(old, 'ping');
         expect(old.events('pong'), hasLength(1));
       });
+    });
+  });
+
+  test('players only get the dice skins they own', () {
+    run(() {
+      final store = MemoryEntitlementStore();
+      roomServices = RoomServices(
+        uidFromToken: (token) async => token == null ? null : 'uid_$token',
+        verifyToken: (_) async => true,
+        persistence: false,
+        testModeAllowed: false,
+        entitlements: EntitlementService(
+          store,
+          catalog: const [
+            ...defaultCatalog,
+            CatalogItem('dice_gold', ItemType.dice),
+          ],
+        ),
+      );
+      store.grant('uid_a', 'dice_gold', source: 'test');
+      clock.flushMicrotasks();
+
+      final a = FakeConnection('a');
+      final b = FakeConnection('b');
+      say(a, 'create_game',
+          data: {'maxPlayers': 2, 'diceSkin': 'dice_gold'}, token: 'a');
+      final code = a.last('game_created')!['roomCode'];
+      say(b, 'join_game',
+          data: {'roomCode': code, 'diceSkin': 'dice_gold'}, token: 'b');
+
+      expect(b.seat('a')['diceSkin'], 'dice_gold');
+      expect(b.seat('b')['diceSkin'], defaultDiceSkin);
     });
   });
 }

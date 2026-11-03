@@ -49,6 +49,10 @@ docker run -p 8080:8080 -e FIREBASE_SERVICE_ACCOUNT_JSON="$(cat service_account.
 
 La imagen nunca incluye `service_account.json` (ver `.dockerignore`); la credencial se pasa al arrancar.
 
+### Artículos cosméticos (semilla de pagos)
+
+`lib/entitlements.dart` define el catálogo (hoy solo los dados y el tablero clásicos, gratis) y el inventario por usuario en `users/{uid}/inventory/{itemId}`, que solo escribe el servidor. Un jugador puede pedir un dado con `diceSkin` al crear o unirse; el servidor lo acepta solo si lo tiene. Para vender artículos, el proveedor de pagos debe verificar la compra en el servidor y llamar a `EntitlementService.grant`, y `revoke` ante un reembolso.
+
 ### Tests
 
 ```bash

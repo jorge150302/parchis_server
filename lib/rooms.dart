@@ -7,6 +7,7 @@ import 'package:meta/meta.dart';
 import 'package:parchis_server/firebase_admin.dart' as admin
     show minClientBuild, testModeAllowed;
 import 'package:parchis_server/firebase_admin.dart';
+import 'package:parchis_server/entitlements.dart';
 import 'package:parchis_server/game_engine.dart';
 import 'package:parchis_server/logic/board_generator.dart';
 import 'package:parchis_server/logic/board_presets.dart';
@@ -30,7 +31,9 @@ class RoomServices {
     required this.persistence,
     required this.testModeAllowed,
     this.minClientBuild = 0,
-  });
+    EntitlementService? entitlements,
+  }) : entitlements =
+            entitlements ?? EntitlementService(MemoryEntitlementStore());
 
   /// Firebase Auth + Firestore, driven by the server configuration.
   factory RoomServices.production() => RoomServices(
@@ -39,6 +42,11 @@ class RoomServices {
         persistence: isAdminConfigured,
         testModeAllowed: admin.testModeAllowed,
         minClientBuild: admin.minClientBuild,
+        entitlements: EntitlementService(
+          isAdminConfigured
+              ? FirestoreEntitlementStore(getAdminFirestore())
+              : MemoryEntitlementStore(),
+        ),
       );
 
   /// The verified Firebase UID for an ID token, or `null`.
@@ -53,6 +61,9 @@ class RoomServices {
 
   /// Apps reporting an older `build` are told to update; 0 accepts any.
   final int minClientBuild;
+
+  /// Who owns which cosmetic items.
+  final EntitlementService entitlements;
 }
 
 RoomServices roomServices = RoomServices.production();
@@ -276,6 +287,27 @@ Future<void> _storeUidAndSetActiveMatch(
   room.playerUids[clientId] = uid;
   _activeUids[uid] = roomCode; // update from __pending__ to real room code
   await _setActiveMatch(uid, roomCode);
+}
+
+/// Lets [clientId] play with the dice skin they asked for if they own it
+/// (otherwise they keep the default), then tells the room.
+Future<void> _applyDiceSkin(
+  ClientConnection channel,
+  String clientId,
+  String? idToken,
+  Object? requested,
+) async {
+  if (requested == null) return;
+  final roomCode = _channelToRoom[channel];
+  final room = roomCode == null ? null : _rooms[roomCode];
+  if (room == null) return;
+  final uid = await roomServices.uidFromToken(idToken);
+  final skin = await roomServices.entitlements.resolveDiceSkin(uid, requested);
+  if (_rooms[room.code] != room) return;
+  final seat = room.engine.players.where((p) => p.id == clientId);
+  if (seat.isEmpty || seat.first.diceSkin == skin) return;
+  seat.first.diceSkin = skin;
+  _broadcastGameState(room.code);
 }
 
 /// Sends `you_finished` to the player's channel and clears their active_match_id.
@@ -784,6 +816,7 @@ Future<void> handleClientMessage(
           level, avatarType, avatarIconId, idToken,
         );
       }
+      unawaited(_applyDiceSkin(channel, clientId, idToken, data['diceSkin']));
       return;
     }
 
@@ -808,6 +841,7 @@ Future<void> handleClientMessage(
         idToken,
         testMode: testMode,
       );
+      unawaited(_applyDiceSkin(channel, clientId, idToken, data['diceSkin']));
     }
 
     if (eventName == 'join_game') {
@@ -837,6 +871,8 @@ Future<void> handleClientMessage(
           avatarIconId,
           idToken,
         );
+        unawaited(
+            _applyDiceSkin(channel, clientId, idToken, data['diceSkin']));
       } else {
         _sendError(channel, 'La sala no existe.');
       }

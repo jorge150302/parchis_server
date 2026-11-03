@@ -53,6 +53,9 @@ class Player {
   String avatarType;
   String? avatarIconId;
 
+  /// Cosmetic dice skin, validated against the player's inventory.
+  String diceSkin = 'dice_classic';
+
   void resetToStart() {
     for (final token in tokens) {
       if (!token.isFinished) {
@@ -92,5 +95,6 @@ class Player {
         'level': level,
         'avatarType': avatarType,
         'avatarIconId': avatarIconId,
+        'diceSkin': diceSkin,
       };
 }

@@ -107,6 +107,13 @@ test('server history is readable and deletable by its owner, never writable', as
   await assertSucceeds(deleteDoc(doc(db, 'users/alice/match_results/m1')));
 });
 
+test('the app cannot grant itself items', async () => {
+  const db = as('alice');
+  await assertFails(setDoc(doc(db, 'users/alice/inventory/dice_gold'),
+    { source: 'purchase:fake' }));
+  await assertSucceeds(getDoc(doc(db, 'users/alice/inventory/dice_gold')));
+});
+
 test('owner can delete their profile', async () => {
   await assertSucceeds(deleteDoc(doc(as('alice'), 'users/alice')));
 });
