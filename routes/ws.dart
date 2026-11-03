@@ -836,6 +836,12 @@ Future<Response> onRequest(RequestContext context) async {
             _channelToPlayer.remove(channel);
             _channelToRoom.remove(channel);
 
+            room.broadcast({'event': 'game_event', 'data': {
+              'message': 'player_surrendered_msg',
+              'playerId': player.id,
+              'type': 'penalty',
+              'args': {'name': player.name},
+            }});
             _broadcastGameState(roomCode);
             _checkAndCleanupRoom(roomCode);
             return;
