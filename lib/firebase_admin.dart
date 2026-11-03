@@ -7,24 +7,53 @@ import 'package:google_cloud_firestore/google_cloud_firestore.dart' show Firesto
 
 FirebaseApp? _adminApp;
 
+/// The Firebase service account, from the first source that is set:
+/// 1. `FIREBASE_SERVICE_ACCOUNT_JSON`: the key file's JSON content (for hosts
+///    that inject secrets as environment variables),
+/// 2. `GOOGLE_APPLICATION_CREDENTIALS`: path to the key file,
+/// 3. `service_account.json` in the working directory (local development).
+Map<String, dynamic>? _serviceAccount() {
+  final env = Platform.environment;
+  final inline = env['FIREBASE_SERVICE_ACCOUNT_JSON'];
+  if (inline != null && inline.trim().isNotEmpty) {
+    return jsonDecode(inline) as Map<String, dynamic>;
+  }
+  final path = env['GOOGLE_APPLICATION_CREDENTIALS'];
+  for (final file in [
+    if (path != null && path.isNotEmpty) File(path),
+    File('service_account.json'),
+  ]) {
+    if (file.existsSync()) {
+      return jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+    }
+  }
+  return null;
+}
+
 /// Returns the lazily-initialised [FirebaseApp].
-/// Throws [StateError] if `service_account.json` is missing.
+/// Throws [StateError] if no service account is configured.
 FirebaseApp getAdminApp() {
   if (_adminApp != null) return _adminApp!;
 
-  final saFile = File('service_account.json');
-  if (!saFile.existsSync()) {
+  final sa = _serviceAccount();
+  if (sa == null) {
     throw StateError(
-      'service_account.json not found. Place the Firebase service account '
-      'file in the parchis_server/ root directory.',
+      'No Firebase service account: set FIREBASE_SERVICE_ACCOUNT_JSON or '
+      'GOOGLE_APPLICATION_CREDENTIALS, or place service_account.json in the '
+      'working directory.',
     );
   }
 
-  final saJson = jsonDecode(saFile.readAsStringSync()) as Map<String, dynamic>;
+  final projectId = sa['project_id'] as String;
   _adminApp = FirebaseApp.initializeApp(
     options: AppOptions(
-      credential: Credential.fromServiceAccount(saFile),
-      projectId: saJson['project_id'] as String,
+      credential: Credential.fromServiceAccountParams(
+        projectId: projectId,
+        email: sa['client_email'] as String,
+        privateKey: sa['private_key'] as String,
+        clientId: sa['client_id'] as String?,
+      ),
+      projectId: projectId,
     ),
   );
   return _adminApp!;
@@ -51,8 +80,9 @@ Future<String?> getUidFromToken(String? idToken) async {
   }
 }
 
-/// `true` when `service_account.json` exists next to the server root.
-bool get isAdminConfigured => File('service_account.json').existsSync();
+/// `true` when a service account is available (see [_serviceAccount]).
+/// Resolved once: credentials don't change while the server runs.
+final bool isAdminConfigured = _serviceAccount() != null;
 
 /// `true` only when the operator explicitly opts into running without Firebase
 /// Admin (`PARCHIS_DEV_AUTH_BYPASS=true`). A deploy that merely lacks

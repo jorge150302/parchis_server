@@ -29,12 +29,24 @@ El servidor escuchará en el puerto **8080**.
 
 | Variable | Efecto |
 |---|---|
-| `PARCHIS_DEV_AUTH_BYPASS=true` | Sin `service_account.json`, acepta conexiones sin verificar el token de Firebase. **Solo desarrollo local.** Si falta el archivo y no se define, el servidor rechaza a todos. |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | Contenido JSON de la cuenta de servicio de Firebase (recomendado en producción: como secreto del hosting). |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Alternativa: ruta al archivo de la cuenta de servicio. Si ninguna está definida, se usa `service_account.json` en la carpeta actual. |
+| `PORT` | Puerto (por defecto 8080). |
+| `PARCHIS_DEV_AUTH_BYPASS=true` | Sin credenciales de Firebase, acepta conexiones sin verificar el token de Firebase. **Solo desarrollo local.** Si falta el archivo y no se define, el servidor rechaza a todos. |
 | `PARCHIS_ALLOW_TEST_MODE=true` | Permite salas `testMode` (dados forzados con `debug_set_dice`). Siempre privadas. **Nunca en producción.** |
 
 ```bash
 PARCHIS_DEV_AUTH_BYPASS=true dart_frog dev --hostname 0.0.0.0
 ```
+
+### Producción (Docker)
+
+```bash
+docker build -t parchis-server .
+docker run -p 8080:8080 -e FIREBASE_SERVICE_ACCOUNT_JSON="$(cat service_account.json)" parchis-server
+```
+
+La imagen nunca incluye `service_account.json` (ver `.dockerignore`); la credencial se pasa al arrancar.
 
 ### Tests
 

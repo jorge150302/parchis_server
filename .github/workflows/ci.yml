@@ -40,6 +40,31 @@ jobs:
           firebase emulators:exec --only firestore --project demo-parchis
           "npm --prefix firebase/rules-test test && dart test test/integration"
 
+  docker:
+    # The production image builds, starts, and carries no credentials.
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Plant a fake credential that must not end up in the image
+        run: echo '{"canary":true}' > service_account.json
+      - run: docker build -t parchis-server .
+      - name: Image contains no service account
+        run: |
+          docker create --name probe parchis-server
+          if docker export probe | tar -t | grep -i service_account; then
+            echo "service_account.json leaked into the image"; exit 1
+          fi
+      - name: Container serves /health
+        run: |
+          docker run -d -p 8080:8080 -e PARCHIS_DEV_AUTH_BYPASS=true --name srv parchis-server
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/health && exit 0
+            sleep 1
+          done
+          docker logs srv
+          exit 1
+
   stress:
     # Concurrent rooms + hostile clients + leak check against a real server.
     runs-on: ubuntu-latest

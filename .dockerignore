@@ -1,0 +1,13 @@
+# Secrets must never enter the image; pass them at runtime.
+service_account.json
+*.json.key
+.env
+
+# Local build output and tooling
+build/
+.dart_tool/
+.dart_frog/
+firebase/rules-test/node_modules/
+.git/
+.github/
+*.log
