@@ -59,6 +59,18 @@ La imagen nunca incluye `service_account.json` (ver `.dockerignore`); la credenc
 dart test
 ```
 
+CI (`.github/workflows/ci.yml`) corre en cada pull request y en cada push a `main`:
+
+| Job | Qué verifica |
+|---|---|
+| `test` | `dart analyze` + tests unitarios |
+| `firestore` | Reglas de seguridad y transacciones contra el emulador de Firestore |
+| `docker` | La imagen compila, responde `/health` y no contiene credenciales |
+| `stress` | `tool/stress_test.dart --quick`: salas concurrentes, clientes hostiles, fugas |
+| `e2e` | El cliente real de la app juega una partida contra este servidor (`frontend_parchis/test/e2e`) |
+
+Para que un fallo bloquee el merge, activa en GitHub *Settings → Branches* la regla de `main` con *Require status checks to pass* y marca estos jobs.
+
 ## 📱 Conexión desde el Cliente (Flutter)
 
 URL del WebSocket:

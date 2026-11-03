@@ -93,3 +93,59 @@ jobs:
       - name: Server log
         if: always()
         run: cat server.log
+
+  e2e:
+    # The app's socket client and game controller play a match against this
+    # server: a protocol change here must not break the shipped client. Uses
+    # the app branch with the same name as this one when it exists, else Jorge.
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pick app branch
+        id: app
+        run: |
+          branch="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          if git ls-remote --exit-code --heads https://github.com/jorge150302/parchis-dominicano.git "$branch" >/dev/null; then
+            echo "ref=$branch" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=Jorge" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        with:
+          repository: jorge150302/parchis-dominicano
+          ref: ${{ steps.app.outputs.ref }}
+          path: app
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.11.5
+      - run: dart pub get
+      - run: dart pub global activate dart_frog_cli
+      - run: dart pub global run dart_frog_cli:dart_frog build
+      - name: Start server (no Firebase credentials, test mode allowed)
+        working-directory: build
+        run: |
+          dart pub get
+          PARCHIS_DEV_AUTH_BYPASS=true PARCHIS_ALLOW_TEST_MODE=true \
+            dart bin/server.dart > ../server.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/health && exit 0
+            sleep 1
+          done
+          cat ../server.log
+          exit 1
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.41.9
+          channel: stable
+          cache: true
+      - name: App end-to-end test
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter test test/e2e
+        env:
+          PARCHIS_E2E_URL: ws://localhost:8080/ws
+      - name: Server log
+        if: always()
+        run: cat server.log
