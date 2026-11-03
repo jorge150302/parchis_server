@@ -28,6 +28,10 @@ class GameRoom {
   final Map<String, String> playerUids = {};        // clientId → Firebase UID
   bool hadMultipleHumans = false;
 
+  /// Players the server switched to auto-play because they disconnected (as
+  /// opposed to players who chose auto-play); reconnecting hands control back.
+  final Set<String> autoPlayFromDisconnect = {};
+
   /// Unique per room lifetime (codes are reused): idempotency key for the
   /// results this match writes to Firestore.
   final int createdAt = DateTime.now().microsecondsSinceEpoch;
@@ -219,7 +223,6 @@ Future<void> _storeUidAndSetActiveMatch(
   final uid = await getUidFromToken(idToken);
   if (uid == null) return;
   room.playerUids[clientId] = uid;
-  if (room.playerUids.length > 1) room.hadMultipleHumans = true;
   _activeUids[uid] = roomCode; // update from __pending__ to real room code
   await _setActiveMatch(uid, roomCode);
 }
@@ -276,7 +279,13 @@ void _checkAndCleanupRoom(String roomCode) {
   // Don't kill if the game is already in the final spectator window.
   if (room.engine.phase == GamePhase.finished) return;
 
-  final humansRemaining = room.playerUids.keys.toList();
+  // Seats still played by a person (possibly in their reconnection grace
+  // period). Counted from the seats, not from playerUids, so the logic is the
+  // same with or without Firebase (dev mode has no UIDs).
+  final humansRemaining = room.engine.players
+      .where((p) => !p.isAI && !p.isFinished)
+      .map((p) => p.id)
+      .toList();
 
   // Last human standing victory: if only one human remains in a match that started with multiple,
   // and that human hasn't finished yet, award them the win automatically.
@@ -422,6 +431,7 @@ Future<Response> onRequest(RequestContext context) async {
           } else {
             if (player.id.isNotEmpty) {
               player.isConnected = false;
+              if (!player.isAutoPlaying) room.autoPlayFromDisconnect.add(player.id);
               player.isAutoPlaying = true;
               _broadcastGameState(roomCode);
             }
@@ -541,6 +551,9 @@ Future<Response> onRequest(RequestContext context) async {
 
               player.isConnected = true;
               player.level = level;
+              if (userRoom.autoPlayFromDisconnect.remove(clientId)) {
+                player.isAutoPlaying = false;
+              }
 
               final oldChannel = userRoom.clients[clientId];
               if (oldChannel != null && oldChannel != channel) {
@@ -950,6 +963,7 @@ void _createAndJoinRoom(
 
   if (room.engine.players.length == room.maxPlayers) {
     room.engine.phase = GamePhase.rolling;
+    room.hadMultipleHumans = room.engine.players.length > 1;
     if (room.testMode) _applyTestMode(room);
   }
 
@@ -991,6 +1005,7 @@ void _joinToRoom(
     _reconnectionTimers.remove(clientId);
     player.isAI = false;
     player.isConnected = true;
+    if (room.autoPlayFromDisconnect.remove(clientId)) player.isAutoPlaying = false;
     player.level = level;
     player.avatarType = avatarType;
     player.avatarIconId = avatarIconId;
@@ -1036,6 +1051,7 @@ void _joinToRoom(
   var gameJustStarted = false;
   if (room.engine.players.length == room.maxPlayers) {
     room.engine.phase = GamePhase.rolling;
+    room.hadMultipleHumans = room.engine.players.length > 1;
     gameJustStarted = true;
     if (room.testMode) _applyTestMode(room);
   }

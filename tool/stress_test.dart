@@ -33,6 +33,7 @@ class Bot {
   Map<String, dynamic>? lastState;
   bool finished = false;
   bool gameOver = false;
+  bool surrendered = false;
   final errors = <String>[];
   final _created = Completer<String>();
   final _joined = Completer<void>();
@@ -115,6 +116,9 @@ class Bot {
         errors.add('${data['code']}');
       case 'you_finished':
         finished = true;
+      case 'surrendered':
+        surrendered = true;
+        gameOver = true; // stops playing; the AI takes the seat
       case 'game_state':
         _onState(data);
       case 'dice_result':
@@ -243,6 +247,49 @@ Future<void> _rejoinAfterAbandonScenario(String url, String clientId) async {
   await Future.wait([fillerA.close(), fillerB.close(), again.close()]);
 }
 
+/// Surrender mid-game: in a 3-player room the game goes on with the AI in
+/// the quitter's seat; in a 2-player room the remaining player wins.
+Future<void> _surrenderScenario(String url, String prefix) async {
+  Future<List<Bot>> room(int size, String tag) async {
+    final bots = [for (var i = 0; i < size; i++) Bot(url, '${prefix}_${tag}_$i')];
+    await Future.wait(bots.map((b) => b.connect()));
+    final code = await bots[0].createGame(size);
+    await Future.wait(bots.skip(1).map((b) => b.joinGame(code)));
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    return bots;
+  }
+
+  final three = await room(3, 'r3');
+  final two = await room(2, 'r2');
+  three[1].send('surrender');
+  two[1].send('surrender');
+  await Future<void>.delayed(const Duration(seconds: 2));
+  // A closed room goes silent; a live one keeps sending turns.
+  final statesAfterSurrender = three[0].statesSeen;
+  await Future<void>.delayed(const Duration(seconds: 6));
+  if (three[0].statesSeen == statesAfterSurrender) {
+    _violation('surrender (3p): the game stopped after one player surrendered');
+  }
+
+  if (!three[1].surrendered) _violation('surrender (3p): no confirmation');
+  final seat = (three[0].lastState?['players'] as List?)
+      ?.cast<Map<String, dynamic>>()
+      .firstWhere((p) => p['id'] == three[1].clientId, orElse: () => {});
+  if (seat?['isAI'] != true) {
+    _violation('surrender (3p): seat not taken over by the AI: $seat');
+  }
+  if (three[0].gameOver || three[0].errors.isNotEmpty) {
+    _violation('surrender (3p): room ended for the others '
+        '(gameOver=${three[0].gameOver}, errors=${three[0].errors})');
+  }
+  if (!two[1].surrendered) _violation('surrender (2p): no confirmation');
+  if (!two[0].finished) _violation('surrender (2p): remaining player did not win');
+  if (_violations.isEmpty) {
+    print('✅ surrender: 3p room continues with AI, 2p room awards the win');
+  }
+  await Future.wait([...three, ...two].map((b) => b.close()));
+}
+
 Future<void> main(List<String> args) async {
   final quick = args.contains('--quick');
   final positional = args.where((a) => !a.startsWith('--')).toList();
@@ -256,6 +303,7 @@ Future<void> main(List<String> args) async {
   String id() => '${run}_bot${n++}';
 
   await _rejoinAfterAbandonScenario(url, '${run}_rejoin');
+  await _surrenderScenario(url, '${run}_quit');
 
   // --- Private rooms: 4x 2p, 4x 3p, 4x 4p, all created at the same time ---
   final roomSizes = quick
@@ -334,6 +382,7 @@ Future<void> main(List<String> args) async {
       }
       print('🔌 dropped & reconnecting ${dropped.length} bots mid-game');
     }
+
   });
 
   // Wait until every room reaches `finished` or time runs out.
